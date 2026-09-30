@@ -3435,6 +3435,7 @@ name = "ef-tests"
 version = "2.5.2"
 dependencies = [
  "alloy-consensus",
+ "alloy-eip7928",
  "alloy-eips 2.5.0",
  "alloy-genesis",
  "alloy-primitives",
