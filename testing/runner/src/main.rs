@@ -5,7 +5,13 @@ use std::{
 };
 
 use clap::{Args, Parser, Subcommand};
-use ef_tests::{cases::blockchain_test::BlockchainTests, result::FixtureResult, Suite};
+use ef_tests::{
+    cases::blockchain_test::{BlockTestOptions, BlockchainTests},
+    result::FixtureResult,
+    Suite,
+};
+
+mod report;
 
 /// Command-line arguments for the test runner.
 #[derive(Debug, Parser)]
@@ -29,6 +35,11 @@ enum Command {
 struct RunArgs {
     /// A fixture file, or a directory searched for fixture files.
     path: PathBuf,
+    /// Run blocks on the sequential executor instead of the BAL-driven parallel one, as the
+    /// node flag of the same name does. Block import has only the sequential executor, so for
+    /// `blocktest` this only changes the reported reason.
+    #[arg(long = "engine.disable-bal-parallel-execution")]
+    disable_bal_parallel_execution: bool,
 }
 
 fn main() {
@@ -39,12 +50,16 @@ fn main() {
         return
     };
 
+    report::init();
     let results = Mutex::new(Vec::new());
     let on_result = |result: FixtureResult| results.lock().unwrap().push(result);
     match command {
         Command::BlockTest(args) => {
             let suite = BlockchainTests::new(fixtures_path(&args.path, "blockchain_tests"));
-            suite.run_fixtures(&on_result);
+            let options = BlockTestOptions {
+                disable_bal_parallel_execution: args.disable_bal_parallel_execution,
+            };
+            suite.run_fixtures(options, &on_result);
         }
     }
     let results = results.into_inner().unwrap();

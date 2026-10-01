@@ -3312,7 +3312,11 @@ version = "2.5.2"
 dependencies = [
  "clap",
  "ef-tests",
+ "reth-engine-tree",
+ "serde",
  "serde_json",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -3345,6 +3349,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.21",
+ "tracing",
  "walkdir",
 ]
 
