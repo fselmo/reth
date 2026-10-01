@@ -3349,6 +3349,7 @@ version = "2.7.0"
 dependencies = [
  "clap",
  "ef-tests",
+ "serde_json",
 ]
 
 [[package]]

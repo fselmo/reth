@@ -11,6 +11,7 @@ exclude.workspace = true
 [dependencies]
 clap = { workspace = true, features = ["derive"] }
 ef-tests.path = "../ef-tests"
+serde_json.workspace = true
 
 [lints]
 workspace = true
