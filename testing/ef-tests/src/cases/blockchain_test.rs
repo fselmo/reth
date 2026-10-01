@@ -2,11 +2,13 @@
 
 use crate::{
     models::{BlockchainTest, ForkSpec},
+    result::{find_json_files, FixtureResult},
     Case, Error, Suite,
 };
 use alloy_eip7928::bal::Bal;
+use alloy_primitives::B256;
 use alloy_rlp::Decodable;
-use rayon::iter::{IndexedParallelIterator, ParallelIterator};
+use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator};
 use reth_chainspec::ChainSpec;
 use reth_consensus::{Consensus, HeaderValidator};
 use reth_db_common::init::{insert_genesis_hashes, insert_genesis_history, insert_genesis_state};
@@ -44,6 +46,36 @@ impl BlockchainTests {
     /// Create a new suite for tests with blockchain tests format.
     pub const fn new(suite_path: PathBuf) -> Self {
         Self { suite_path }
+    }
+
+    /// Runs every fixture in the JSON files under the suite path, which may also be a single
+    /// file, and passes one result per fixture to `on_result` as it completes.
+    ///
+    /// Unlike [`Suite::run`], this follows symlinks and reports a file that fails to load as a
+    /// failed result instead of panicking.
+    pub fn run_fixtures(&self, on_result: &(dyn Fn(FixtureResult) + Sync)) {
+        find_json_files(&self.suite_path).into_par_iter().for_each(|path| {
+            let case = match BlockchainTestCase::load(&path) {
+                Ok(case) => case,
+                Err(err) => return on_result(FixtureResult::load_failed(&path, err)),
+            };
+            for (name, test) in case.tests {
+                if BlockchainTestCase::excluded_fork(test.network) {
+                    continue
+                }
+                let fork = format!("{:?}", test.network);
+                if case.skip {
+                    on_result(FixtureResult::new(name, fork, Err(Error::Skipped)));
+                    continue
+                }
+                let mut last_block_hash = test.genesis_block_header.hash;
+                let result =
+                    BlockchainTestCase::run_single_case_with(&name, &test, &mut last_block_hash);
+                on_result(
+                    FixtureResult::new(name, fork, result).with_last_block_hash(last_block_hash),
+                );
+            }
+        });
     }
 }
 
@@ -104,8 +136,19 @@ impl BlockchainTestCase {
     /// Execute a single `BlockchainTest`, validating the outcome against the
     /// expectations encoded in the JSON file.
     pub fn run_single_case(name: &str, case: &BlockchainTest) -> Result<(), Error> {
+        let mut last_block_hash = B256::ZERO;
+        Self::run_single_case_with(name, case, &mut last_block_hash)
+    }
+
+    /// Like [`Self::run_single_case`], setting `last_block_hash` to the hash of the last block
+    /// that was imported, or of genesis if none was.
+    pub fn run_single_case_with(
+        name: &str,
+        case: &BlockchainTest,
+        last_block_hash: &mut B256,
+    ) -> Result<(), Error> {
         let expectation = Self::expected_failure(case);
-        match run_case(case) {
+        match run_case(case, last_block_hash) {
             // All blocks executed successfully.
             Ok(()) => {
                 // Check if the test case specifies that it should have failed
@@ -195,7 +238,7 @@ impl Case for BlockchainTestCase {
 /// Returns:
 /// - `Ok(())` if all blocks execute successfully.
 /// - `Err(Error)` if any block fails to execute correctly.
-fn run_case(case: &BlockchainTest) -> Result<(), Error> {
+fn run_case(case: &BlockchainTest, last_block_hash: &mut B256) -> Result<(), Error> {
     // Create a new test database and initialize a provider for the test case.
     let chain_spec = case.network.to_chain_spec();
     let factory = create_test_provider_factory_with_chain_spec(chain_spec.clone());
@@ -210,6 +253,7 @@ fn run_case(case: &BlockchainTest) -> Result<(), Error> {
     .unwrap();
 
     provider.insert_block(&genesis_block).map_err(|err| Error::block_failed(0, err))?;
+    *last_block_hash = genesis_block.hash();
 
     // Increment block number for receipts static file
     provider
@@ -314,6 +358,7 @@ fn run_case(case: &BlockchainTest) -> Result<(), Error> {
             .map_err(|err| Error::block_failed(block_number, err))?;
 
         // Since there were no errors, update the parent block
+        *last_block_hash = block.hash();
         parent = block.clone()
     }
 
