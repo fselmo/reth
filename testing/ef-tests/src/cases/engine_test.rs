@@ -539,3 +539,114 @@ async fn forkchoice_updated(rpc: &RpcModule<()>, version: &str, head: B256) -> R
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::{ForkSpec, Header, State};
+    use alloy_consensus::{EMPTY_OMMER_ROOT_HASH, EMPTY_ROOT_HASH};
+    use alloy_eips::eip1559::BaseFeeParams;
+    use alloy_primitives::{Address, Bloom, U256};
+    use alloy_rpc_types_engine::ExecutionPayloadV1;
+
+    /// A Paris fixture whose one payload is an empty block on genesis with the given state root,
+    /// and that payload's block hash.
+    fn empty_block_fixture(state_root: Option<B256>) -> (EngineTest, B256) {
+        let mut test = EngineTest {
+            genesis_block_header: Header {
+                gas_limit: U256::from(30_000_000),
+                base_fee_per_gas: Some(U256::from(1_000_000_000)),
+                ..Default::default()
+            },
+            pre: State::default(),
+            lastblockhash: B256::ZERO,
+            network: ForkSpec::Merge,
+            engine_new_payloads: Vec::new(),
+        };
+        let chain_spec = test.chain_spec();
+        let genesis = chain_spec.genesis_header();
+        test.genesis_block_header.hash = chain_spec.genesis_hash();
+
+        let header = alloy_consensus::Header {
+            parent_hash: chain_spec.genesis_hash(),
+            ommers_hash: EMPTY_OMMER_ROOT_HASH,
+            state_root: state_root.unwrap_or(genesis.state_root),
+            transactions_root: EMPTY_ROOT_HASH,
+            receipts_root: EMPTY_ROOT_HASH,
+            number: 1,
+            gas_limit: genesis.gas_limit,
+            timestamp: 12,
+            base_fee_per_gas: genesis.next_block_base_fee(BaseFeeParams::ethereum()),
+            ..Default::default()
+        };
+        let block_hash = header.hash_slow();
+        let payload = ExecutionPayloadV1 {
+            parent_hash: header.parent_hash,
+            fee_recipient: Address::ZERO,
+            state_root: header.state_root,
+            receipts_root: header.receipts_root,
+            logs_bloom: Bloom::ZERO,
+            prev_randao: B256::ZERO,
+            block_number: header.number,
+            gas_limit: header.gas_limit,
+            gas_used: 0,
+            timestamp: header.timestamp,
+            extra_data: Default::default(),
+            base_fee_per_gas: U256::from(header.base_fee_per_gas.unwrap()),
+            block_hash,
+            transactions: Vec::new(),
+        };
+        test.engine_new_payloads.push(EngineNewPayload {
+            params: vec![serde_json::to_value(payload).unwrap()],
+            new_payload_version: "1".to_string(),
+            forkchoice_updated_version: "1".to_string(),
+            validation_error: None,
+            error_code: None,
+        });
+        (test, block_hash)
+    }
+
+    /// Runs a fixture as a worker does and checks that its datadir is removed.
+    fn run(test: &EngineTest) -> FixtureResult {
+        let datadir_root = tempfile::tempdir().unwrap();
+        let (result, remains) =
+            run_fixture("test".to_string(), test, &tree_config(false), datadir_root.path());
+        let mut cleanup = Cleanup::default();
+        cleanup.remains.push(remains);
+        cleanup.finish();
+        assert_eq!(fs::read_dir(datadir_root.path()).unwrap().count(), 0, "datadir left behind");
+        result
+    }
+
+    #[test]
+    fn valid_payload_becomes_head() {
+        let (mut test, block_hash) = empty_block_fixture(None);
+        test.lastblockhash = block_hash;
+
+        let result = run(&test);
+        assert!(result.pass, "{}", result.error);
+        assert_eq!(result.last_block_hash, Some(block_hash));
+        assert_eq!(result.last_payload_status.as_deref(), Some("VALID"));
+    }
+
+    #[test]
+    fn invalid_payload_is_rejected() {
+        let (mut test, _) = empty_block_fixture(Some(B256::repeat_byte(1)));
+        test.lastblockhash = test.genesis_block_header.hash;
+        test.engine_new_payloads[0].validation_error = Some("state root mismatch".to_string());
+
+        let result = run(&test);
+        assert!(result.pass, "{}", result.error);
+        assert_eq!(result.last_block_hash, Some(test.genesis_block_header.hash));
+        assert_eq!(result.last_payload_status.as_deref(), Some("INVALID"));
+    }
+
+    #[test]
+    fn unexpected_verdict_fails() {
+        let (mut test, block_hash) = empty_block_fixture(Some(B256::repeat_byte(1)));
+        test.lastblockhash = block_hash;
+
+        let result = run(&test);
+        assert!(!result.pass);
+        assert_eq!(result.last_payload_status.as_deref(), Some("INVALID"));
+    }
+}
