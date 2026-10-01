@@ -14,7 +14,7 @@ use crate::{
 };
 use alloy_primitives::B256;
 use alloy_rpc_types_engine::{ClientCode, ClientVersionV1};
-use futures::future::poll_fn;
+use futures::StreamExt;
 use jsonrpsee::RpcModule;
 use reth_chainspec::{ChainSpec, EthChainSpec};
 use reth_db::{
@@ -25,15 +25,13 @@ use reth_db::{
 use reth_db_common::init::init_genesis;
 use reth_engine_primitives::{ConsensusEngineHandle, NoopInvalidBlockHook};
 use reth_engine_tree::{
-    chain::{ChainHandler, FromOrchestrator, HandlerEvent},
-    download::BasicBlockDownloader,
-    engine::{EngineApiKind, EngineApiRequestHandler, EngineHandler},
-    persistence::PersistenceHandle,
-    tree::{BasicEngineValidator, EngineApiTreeHandler, TreeConfig},
+    chain::{ChainEvent, FromOrchestrator},
+    engine::{EngineApiKind, EngineRequestHandler},
+    launch::EngineOrchestratorBuilder,
+    tree::{BasicEngineValidator, TreeConfig},
 };
 use reth_eth_wire_types::EthNetworkPrimitives;
 use reth_ethereum_consensus::EthBeaconConsensus;
-use reth_ethereum_primitives::EthPrimitives;
 use reth_evm_ethereum::EthEvmConfig;
 use reth_network_api::noop::NoopNetwork;
 use reth_network_p2p::full_block::NoopFullBlockClient;
@@ -45,9 +43,11 @@ use reth_provider::{
     providers::{BlockchainProvider, RocksDBBuilder, StaticFileProvider},
     BlockNumReader, ProviderFactory,
 };
-use reth_prune::PrunerBuilder;
+use reth_prune::{PruneModes, PrunerBuilder};
 use reth_rpc_api::EngineApiServer;
 use reth_rpc_engine_api::{EngineApi, EngineCapabilities};
+use reth_stages_api::Pipeline;
+use reth_static_file::StaticFileProducer;
 use reth_storage_overlay::OverlayManager;
 use reth_tasks::Runtime;
 use reth_transaction_pool::noop::NoopTransactionPool;
@@ -57,7 +57,6 @@ use std::{
     fs,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
-    task::Poll,
     time::Duration,
 };
 use tokio_stream::wrappers::UnboundedReceiverStream;
@@ -103,16 +102,7 @@ impl EngineTests {
         options: EngineTestOptions,
         on_result: &(dyn Fn(FixtureResult) + Sync),
     ) {
-        let engine_args = EngineArgs {
-            bal_parallel_execution_disabled: options.disable_bal_parallel_execution,
-            // The default 4 GB cache would dominate the memory of concurrent workers.
-            cross_block_cache_size: CROSS_BLOCK_CACHE_SIZE_MB,
-            // Keep a fixture's blocks in memory instead of persisting them while it runs.
-            persistence_threshold: PERSISTENCE_THRESHOLD,
-            ..Default::default()
-        };
-        engine_args.validate().expect("the runner's engine arguments are valid");
-        let tree_config = engine_args.tree_config();
+        let tree_config = tree_config(options.disable_bal_parallel_execution);
         let files = Mutex::new(find_json_files(&self.suite_path).into_iter());
         std::thread::scope(|scope| {
             for _ in 0..options.workers.max(1) {
@@ -139,6 +129,20 @@ impl EngineTests {
             }
         });
     }
+}
+
+/// Returns the engine tree configuration of the node with the runner's engine arguments.
+fn tree_config(disable_bal_parallel_execution: bool) -> TreeConfig {
+    let engine_args = EngineArgs {
+        bal_parallel_execution_disabled: disable_bal_parallel_execution,
+        // The default 4 GB cache would dominate the memory of concurrent workers.
+        cross_block_cache_size: CROSS_BLOCK_CACHE_SIZE_MB,
+        // Keep a fixture's blocks in memory instead of persisting them while it runs.
+        persistence_threshold: PERSISTENCE_THRESHOLD,
+        ..Default::default()
+    };
+    engine_args.validate().expect("the runner's engine arguments are valid");
+    engine_args.tree_config()
 }
 
 fn load(path: &Path) -> Result<BTreeMap<String, EngineTest>, Error> {
@@ -350,52 +354,53 @@ impl Engine {
             overlay_manager.clone(),
             runtime.clone(),
         );
-        let (sync_metrics_tx, _) = tokio::sync::mpsc::unbounded_channel();
-        let persistence = PersistenceHandle::<EthPrimitives>::spawn_service(
-            factory.clone(),
-            PrunerBuilder::default().build_with_provider_factory(factory),
-            sync_metrics_tx,
-        );
         let payload_builder = PayloadBuilderHandle::<EthEngineTypes>::noop();
-        let (to_tree, from_tree) = EngineApiTreeHandler::spawn_new(
-            provider.clone(),
-            consensus.clone(),
-            validator,
-            persistence,
-            payload_builder.clone(),
-            provider.canonical_in_memory_state(),
-            overlay_manager,
-            tree_config.clone(),
-            EngineApiKind::Ethereum,
-            evm_config,
-            runtime.clone(),
-        );
-
-        // The node polls this handler from its chain orchestrator, which also runs backfill sync;
-        // fixtures never trigger backfill.
         let (to_engine, from_api) = tokio::sync::mpsc::unbounded_channel();
-        let mut handler = EngineHandler::new(
-            EngineApiRequestHandler::new(to_tree, from_tree),
-            BasicBlockDownloader::new(
-                NoopFullBlockClient::<EthNetworkPrimitives>::default(),
-                consensus,
+        let (sync_metrics_tx, _) = tokio::sync::mpsc::unbounded_channel();
+        // Built as the node's engine launcher builds it. A fixture's payloads extend blocks the
+        // engine already has, so nothing is downloaded or backfilled: the block client is a no-op
+        // and the backfill pipeline has no stages.
+        let mut orchestrator = EngineOrchestratorBuilder {
+            engine_kind: EngineApiKind::Ethereum,
+            consensus,
+            client: NoopFullBlockClient::<EthNetworkPrimitives>::default(),
+            incoming_requests: UnboundedReceiverStream::new(from_api),
+            pipeline: Pipeline::<FixtureNode>::builder().build(
+                factory.clone(),
+                StaticFileProducer::new(factory.clone(), PruneModes::default()),
             ),
-            UnboundedReceiverStream::new(from_api),
-        );
-        let (to_handler, mut from_runner) = tokio::sync::mpsc::unbounded_channel();
-        // Events for the chain orchestrator (canonical chain updates, backfill requests) have no
-        // consumer here and are dropped.
-        let handler = runtime.handle().spawn(poll_fn(move |cx| {
-            while let Poll::Ready(Some(event)) = from_runner.poll_recv(cx) {
-                handler.on_event(event);
-            }
-            while let Poll::Ready(event) = handler.poll(cx) {
-                if matches!(event, HandlerEvent::FatalError) {
-                    return Poll::Ready(())
+            pipeline_task_spawner: runtime.clone(),
+            provider: factory.clone(),
+            blockchain_db: provider.clone(),
+            pruner: PrunerBuilder::default().build_with_provider_factory(factory),
+            payload_builder: payload_builder.clone(),
+            payload_validator: validator,
+            overlay_manager,
+            tree_config: tree_config.clone(),
+            sync_metrics_tx,
+            evm_config,
+            runtime: runtime.clone(),
+        }
+        .build();
+
+        // Polls the orchestrator as the node's consensus engine task does, without the network
+        // and event bookkeeping, and passes on the runner's terminate request.
+        let (to_handler, mut from_runner) =
+            tokio::sync::mpsc::unbounded_channel::<FromOrchestrator>();
+        let handler = runtime.handle().spawn(async move {
+            loop {
+                tokio::select! {
+                    event = orchestrator.next() => {
+                        if matches!(event, None | Some(ChainEvent::FatalError)) {
+                            break
+                        }
+                    }
+                    Some(event) = from_runner.recv() => {
+                        orchestrator.handler_mut().handler_mut().on_event(event.into());
+                    }
                 }
             }
-            Poll::Pending
-        }));
+        });
 
         let api = EngineApi::new(
             provider.clone(),
@@ -533,3 +538,4 @@ async fn forkchoice_updated(rpc: &RpcModule<()>, version: &str, head: B256) -> R
         _ => Err(format!("{method} returned {response}, expected status VALID")),
     }
 }
+

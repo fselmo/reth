@@ -3404,6 +3404,8 @@ dependencies = [
  "reth-revm",
  "reth-rpc-api",
  "reth-rpc-engine-api",
+ "reth-stages-api",
+ "reth-static-file",
  "reth-storage-overlay",
  "reth-tasks",
  "reth-tracing",
