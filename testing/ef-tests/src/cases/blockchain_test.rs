@@ -581,3 +581,46 @@ fn path_contains(path_str: &str, rhs: &[&str]) -> bool {
     let rhs = rhs.join(std::path::MAIN_SEPARATOR_STR);
     path_str.contains(&rhs)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// A block with the given gas limit whose header commits to `access_list`.
+    fn block_committing_to(
+        access_list: &serde_json::Value,
+        gas_limit: u64,
+    ) -> RecoveredBlock<Block> {
+        let access_list: Bal =
+            serde_json::from_value::<BlockAccessList>(access_list.clone()).unwrap().into();
+        let header = alloy_consensus::Header {
+            gas_limit,
+            block_access_list_hash: Some(access_list.compute_hash()),
+            ..Default::default()
+        };
+        RecoveredBlock::new_unhashed(Block { header, body: Default::default() }, Vec::new())
+    }
+
+    fn access_list(storage_read: &str) -> serde_json::Value {
+        json!([{
+            "address": "0x0000000000000000000000000000000000000001",
+            "storageChanges": [],
+            "storageReads": [storage_read],
+            "balanceChanges": [],
+            "nonceChanges": [],
+            "codeChanges": []
+        }])
+    }
+
+    #[test]
+    fn delivered_access_list_is_checked() {
+        let block = block_committing_to(&access_list("0x1"), 30_000_000);
+        assert!(validate_delivered_access_list(&block, &access_list("0x1")).is_ok());
+        assert!(validate_delivered_access_list(&block, &access_list("0x2")).is_err());
+        assert!(validate_delivered_access_list(&block, &json!({"address": "0x01"})).is_err());
+
+        let block = block_committing_to(&access_list("0x1"), 1);
+        assert!(validate_delivered_access_list(&block, &access_list("0x1")).is_err());
+    }
+}
