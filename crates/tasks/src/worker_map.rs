@@ -191,9 +191,13 @@ impl WorkerMap {
 impl Drop for WorkerMap {
     fn drop(&mut self) {
         for (_, mut w) in std::mem::take(&mut self.workers) {
-            // Drop sender so the thread's recv loop exits, then join.
+            // Drop sender so the thread's recv loop exits, then join. A task on a worker can hold
+            // the last handle to the map, so the map can be dropped on that worker's own thread,
+            // which exits once the task returns and cannot be joined from itself.
             drop(w.tx);
-            if let Some(handle) = w.handle.take() {
+            if let Some(handle) = w.handle.take() &&
+                handle.thread().id() != thread::current().id()
+            {
                 let _ = handle.join();
             }
         }
@@ -293,5 +297,21 @@ mod tests {
 
         let third = map.try_spawn_on("busy-worker", || 3).expect("worker should be idle");
         assert_eq!(third.await.unwrap(), 3);
+    }
+
+    #[test]
+    fn worker_map_dropped_on_its_worker() {
+        let map = Arc::new(WorkerMap::new());
+        let last_handle = map.clone();
+        let (start_tx, start_rx) = std::sync::mpsc::channel();
+
+        let dropped = map.spawn_on("self-drop", move || {
+            start_rx.recv().unwrap();
+            drop(last_handle);
+        });
+        drop(map);
+        start_tx.send(()).unwrap();
+
+        dropped.blocking_recv().expect("dropping the map on its own worker should not panic");
     }
 }
