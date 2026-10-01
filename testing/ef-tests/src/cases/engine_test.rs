@@ -70,12 +70,14 @@ const ENGINE_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 const DATABASE_RELEASE_TIMEOUT: Duration = Duration::from_millis(100);
 
 /// Options for running engine tests.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct EngineTestOptions {
     /// The node's `--engine.disable-bal-parallel-execution`.
     pub disable_bal_parallel_execution: bool,
     /// How many fixtures run at once, each worker with its own runtime.
     pub workers: usize,
+    /// The directory in which each fixture's temporary datadir is created, e.g. a tmpfs.
+    pub datadir_root: PathBuf,
 }
 
 /// A handler for blockchain tests in the engine format.
@@ -124,6 +126,7 @@ impl EngineTests {
                                 name,
                                 &test,
                                 &tree_config,
+                                &options.datadir_root,
                                 &runtime,
                                 &mut datadirs,
                             ));
@@ -164,13 +167,20 @@ fn run_fixture(
     name: String,
     test: &EngineTest,
     tree_config: &TreeConfig,
+    datadir_root: &Path,
     runtime: &Runtime,
     datadirs: &mut Vec<PathBuf>,
 ) -> FixtureResult {
     let fork = format!("{:?}", test.network);
     let mut outcome = Outcome::default();
-    let result =
-        runtime.handle().block_on(run_case(test, tree_config, runtime, &mut outcome, datadirs));
+    let result = runtime.handle().block_on(run_case(
+        test,
+        tree_config,
+        datadir_root,
+        runtime,
+        &mut outcome,
+        datadirs,
+    ));
     let mut result = FixtureResult::new(name, fork, result);
     result.last_block_hash = outcome.last_block_hash;
     result.last_payload_status = outcome.last_payload_status;
@@ -182,6 +192,7 @@ type FixtureNode = NodeTypesWithDBAdapter<EthereumNode, Arc<DatabaseEnv>>;
 async fn run_case(
     test: &EngineTest,
     tree_config: &TreeConfig,
+    datadir_root: &Path,
     runtime: &Runtime,
     outcome: &mut Outcome,
     datadirs: &mut Vec<PathBuf>,
@@ -197,7 +208,7 @@ async fn run_case(
 
     let datadir = tempfile::Builder::new()
         .prefix("reth-enginetest-")
-        .tempdir()
+        .tempdir_in(datadir_root)
         .map_err(|err| Error::Assertion(format!("failed to create a datadir: {err}")))?
         .keep();
     let engine = match Engine::start(chain_spec, &datadir, tree_config, runtime) {

@@ -29,14 +29,18 @@ enum Command {
     /// Run blockchain tests by importing their blocks.
     #[command(name = "blocktest")]
     BlockTest(RunArgs),
-    /// Run blockchain tests in the engine format through the Engine API of an in-process node.
+    /// Run blockchain tests in the engine format through reth's Engine API handler.
     #[command(name = "enginetest")]
     EngineTest {
         #[command(flatten)]
         args: RunArgs,
-        /// How many fixtures run at once, each against its own node.
+        /// How many fixtures run at once, each worker with its own runtime.
         #[arg(long, default_value_t = default_workers())]
         workers: usize,
+        /// Where each fixture's temporary datadir is created. Defaults to the system temporary
+        /// directory (`TMPDIR`); a tmpfs such as `/dev/shm` avoids disk syncs.
+        #[arg(long, value_name = "DIR", default_value_os_t = std::env::temp_dir())]
+        datadir_root: PathBuf,
     },
 }
 
@@ -89,11 +93,12 @@ fn main() {
             suite.run_fixtures(options, &|result| printer.push(result));
             printer.finish();
         }
-        Command::EngineTest { args, workers } => {
+        Command::EngineTest { args, workers, datadir_root } => {
             let suite = EngineTests::new(fixtures_path(&args.path, "blockchain_tests_engine"));
             let options = EngineTestOptions {
                 disable_bal_parallel_execution: args.disable_bal_parallel_execution,
                 workers,
+                datadir_root,
             };
             let printer = ResultPrinter::new(args.output_format());
             suite.run_fixtures(options, &|result| printer.push(result));
