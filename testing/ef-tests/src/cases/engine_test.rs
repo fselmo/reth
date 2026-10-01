@@ -18,7 +18,11 @@ use alloy_rpc_types_engine::{ClientCode, ClientVersionV1};
 use futures::future::poll_fn;
 use jsonrpsee::RpcModule;
 use reth_chainspec::{ChainSpec, EthChainSpec};
-use reth_db::{init_db, mdbx::DatabaseArguments, DatabaseEnv};
+use reth_db::{
+    init_db,
+    mdbx::{DatabaseArguments, SyncMode},
+    DatabaseEnv,
+};
 use reth_db_common::init::init_genesis;
 use reth_engine_primitives::{ConsensusEngineHandle, NoopInvalidBlockHook};
 use reth_engine_tree::{
@@ -264,7 +268,13 @@ impl Engine {
             Error::Assertion(format!("failed to set up the engine: {err}"))
         };
         let db = Arc::new(
-            init_db(datadir.join("db"), DatabaseArguments::test()).map_err(|e| setup_err(&e))?,
+            init_db(
+                datadir.join("db"),
+                // The database is thrown away after the fixture, so skip MDBX's durable syncs
+                // (`--db.sync-mode safe-no-sync`).
+                DatabaseArguments::test().with_sync_mode(Some(SyncMode::SafeNoSync)),
+            )
+            .map_err(|e| setup_err(&e))?,
         );
         let overlay_manager = OverlayManager::new(runtime.state_trie_overlay_worker_pool());
         let factory = ProviderFactory::<FixtureNode>::new(
