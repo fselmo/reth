@@ -5,12 +5,12 @@ use crate::{
     result::{find_json_files, FixtureResult},
     Case, Error, Suite,
 };
-use alloy_eip7928::bal::Bal;
+use alloy_eip7928::{bal::Bal, BlockAccessList};
 use alloy_primitives::B256;
 use alloy_rlp::Decodable;
 use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator};
 use reth_chainspec::ChainSpec;
-use reth_consensus::{Consensus, HeaderValidator};
+use reth_consensus::{Consensus, ConsensusError, HeaderValidator};
 use reth_db_common::init::{insert_genesis_hashes, insert_genesis_history, insert_genesis_state};
 use reth_ethereum_consensus::{validate_block_post_execution, EthBeaconConsensus};
 use reth_ethereum_primitives::Block;
@@ -19,7 +19,7 @@ use reth_evm::{
     ConfigureEvm,
 };
 use reth_evm_ethereum::EthEvmConfig;
-use reth_primitives_traits::{ParallelBridgeBuffered, RecoveredBlock, SealedBlock};
+use reth_primitives_traits::{GotExpected, ParallelBridgeBuffered, RecoveredBlock, SealedBlock};
 use reth_provider::{
     test_utils::create_test_provider_factory_with_chain_spec, BlockWriter, DatabaseProviderFactory,
     ExecutionOutcome, HashedPostStateProvider, HistoryWriter, OriginalValuesKnown, StateProvider,
@@ -300,6 +300,16 @@ fn run_case(case: &BlockchainTest, last_block_hash: &mut B256) -> Result<(), Err
         pre_execution_checks(chain_spec.clone(), &parent, block)
             .map_err(|err| Error::block_failed(block_number, err))?;
 
+        // Like a block downloaded with its access list, the delivered list counts only when the
+        // header commits to one.
+        let access_list = case.blocks[block_index]
+            .access_list()
+            .filter(|_| block.block_access_list_hash.is_some());
+        if let Some(access_list) = access_list {
+            validate_delivered_access_list(block, access_list)
+                .map_err(|err| Error::block_failed(block_number, err))?;
+        }
+
         // Execute the block
         let state_provider = provider.latest();
         let state_db = StateProviderDatabase((&state_provider).into_evm_state_provider());
@@ -405,6 +415,28 @@ fn decode_blocks(
     }
 
     Ok(blocks)
+}
+
+/// Checks the access list delivered beside a block the way the engine checks one downloaded with
+/// it: the list must decode, match the hash in the header and fit the block's gas limit.
+fn validate_delivered_access_list(
+    block: &RecoveredBlock<Block>,
+    access_list: &serde_json::Value,
+) -> Result<(), Error> {
+    let access_list: Bal = serde_json::from_value::<BlockAccessList>(access_list.clone())
+        .map_err(|err| Error::Assertion(format!("undecodable block access list: {err}")))?
+        .into();
+    let hash = access_list.compute_hash();
+    if let Some(expected) = block.block_access_list_hash &&
+        hash != expected
+    {
+        return Err(ConsensusError::BlockAccessListHashMismatch(
+            GotExpected { got: hash, expected }.into(),
+        )
+        .into())
+    }
+    access_list.validate_gas_limit(block.gas_limit).map_err(ConsensusError::from)?;
+    Ok(())
 }
 
 fn pre_execution_checks(
