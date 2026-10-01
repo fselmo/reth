@@ -3,10 +3,12 @@ use std::path::{Path, PathBuf};
 
 use clap::{Args, Parser, Subcommand};
 use ef_tests::{
-    cases::blockchain_test::BlockchainTests,
+    cases::blockchain_test::{BlockTestOptions, BlockchainTests},
     result::{OutputFormat, ResultPrinter},
     Suite,
 };
+
+mod report;
 
 /// Command-line arguments for the test runner.
 #[derive(Debug, Parser)]
@@ -36,6 +38,10 @@ struct RunArgs {
     /// Print each result as a JSON object on its own line of stdout, as it completes.
     #[arg(long)]
     jsonl: bool,
+    /// Run blocks on the sequential executor instead of the BAL-driven parallel one, as the
+    /// node flag of the same name does. Block import always runs the sequential executor.
+    #[arg(long = "engine.disable-bal-parallel-execution")]
+    disable_bal_parallel_execution: bool,
 }
 
 impl RunArgs {
@@ -56,15 +62,20 @@ fn main() {
         return
     };
 
+    report::init();
     match command {
         Command::BlockTest(args) => {
             let suite = BlockchainTests::new(fixtures_path(&args.path, "blockchain_tests"));
+            let options = BlockTestOptions {
+                disable_bal_parallel_execution: args.disable_bal_parallel_execution,
+            };
             let printer = ResultPrinter::new(args.output_format());
-            suite.run_fixtures(&|result| printer.push(result));
+            suite.run_fixtures(options, &|result| printer.push(result));
             printer.finish();
         }
     }
 }
+
 /// Returns the `format` directory of a fixtures release if `path` is one, otherwise `path`.
 fn fixtures_path(path: &Path, format: &str) -> PathBuf {
     let candidate = path.join(format);

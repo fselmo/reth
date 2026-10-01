@@ -32,6 +32,7 @@ reth-revm.workspace = true
 reth-tracing.workspace = true
 reth-trie.workspace = true
 reth-trie-db.workspace = true
+reth-engine-tree.workspace = true
 revm = { workspace = true, features = ["secp256k1", "blst", "c-kzg", "memory_limit", "p256-aws-lc-rs"] }
 
 alloy-rlp.workspace = true
@@ -40,6 +41,7 @@ alloy-eips.workspace = true
 alloy-consensus.workspace = true
 alloy-genesis.workspace = true
 
+tracing.workspace = true
 walkdir.workspace = true
 serde.workspace = true
 serde_json.workspace = true

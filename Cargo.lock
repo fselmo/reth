@@ -3359,6 +3359,11 @@ version = "2.7.0"
 dependencies = [
  "clap",
  "ef-tests",
+ "reth-engine-tree",
+ "serde",
+ "serde_json",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -3377,6 +3382,7 @@ dependencies = [
  "reth-db",
  "reth-db-api",
  "reth-db-common",
+ "reth-engine-tree",
  "reth-ethereum-consensus",
  "reth-ethereum-primitives",
  "reth-evm",
@@ -3391,6 +3397,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.20",
+ "tracing",
  "walkdir",
 ]
 

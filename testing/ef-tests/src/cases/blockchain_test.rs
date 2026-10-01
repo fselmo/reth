@@ -12,6 +12,7 @@ use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterato
 use reth_chainspec::ChainSpec;
 use reth_consensus::{Consensus, ConsensusError, HeaderValidator};
 use reth_db_common::init::{insert_genesis_hashes, insert_genesis_history, insert_genesis_state};
+use reth_engine_tree::tree::payload_validator::BAL_EXECUTION_PATH_TARGET;
 use reth_ethereum_consensus::{validate_block_post_execution, EthBeaconConsensus};
 use reth_ethereum_primitives::Block;
 use reth_evm::{
@@ -35,6 +36,7 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
+use tracing::debug;
 
 /// A handler for the blockchain test suite.
 #[derive(Debug)]
@@ -53,7 +55,11 @@ impl BlockchainTests {
     ///
     /// Unlike [`Suite::run`], this follows symlinks and reports a file that fails to load as a
     /// failed result instead of panicking.
-    pub fn run_fixtures(&self, on_result: &(dyn Fn(FixtureResult) + Sync)) {
+    pub fn run_fixtures(
+        &self,
+        options: BlockTestOptions,
+        on_result: &(dyn Fn(FixtureResult) + Sync),
+    ) {
         find_json_files(&self.suite_path).into_par_iter().for_each(|path| {
             let case = match BlockchainTestCase::load(&path) {
                 Ok(case) => case,
@@ -69,8 +75,12 @@ impl BlockchainTests {
                     continue
                 }
                 let mut last_block_hash = test.genesis_block_header.hash;
-                let result =
-                    BlockchainTestCase::run_single_case_with(&name, &test, &mut last_block_hash);
+                let result = BlockchainTestCase::run_single_case_with(
+                    &name,
+                    &test,
+                    options,
+                    &mut last_block_hash,
+                );
                 on_result(
                     FixtureResult::new(name, fork, result).with_last_block_hash(last_block_hash),
                 );
@@ -85,6 +95,14 @@ impl Suite for BlockchainTests {
     fn suite_path(&self) -> &Path {
         &self.suite_path
     }
+}
+
+/// Options for running blockchain tests.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct BlockTestOptions {
+    /// The node's `--engine.disable-bal-parallel-execution`. Block import always runs the
+    /// sequential executor, so this only changes the reported reason.
+    pub disable_bal_parallel_execution: bool,
 }
 
 /// An Ethereum blockchain test.
@@ -137,18 +155,19 @@ impl BlockchainTestCase {
     /// expectations encoded in the JSON file.
     pub fn run_single_case(name: &str, case: &BlockchainTest) -> Result<(), Error> {
         let mut last_block_hash = B256::ZERO;
-        Self::run_single_case_with(name, case, &mut last_block_hash)
+        Self::run_single_case_with(name, case, BlockTestOptions::default(), &mut last_block_hash)
     }
 
-    /// Like [`Self::run_single_case`], setting `last_block_hash` to the hash of the last block
-    /// that was imported, or of genesis if none was.
+    /// Like [`Self::run_single_case`], with the given options. `last_block_hash` is set to the
+    /// hash of the last block that was imported, or of genesis if none was.
     pub fn run_single_case_with(
         name: &str,
         case: &BlockchainTest,
+        options: BlockTestOptions,
         last_block_hash: &mut B256,
     ) -> Result<(), Error> {
         let expectation = Self::expected_failure(case);
-        match run_case(case, last_block_hash) {
+        match run_case(case, options, last_block_hash) {
             // All blocks executed successfully.
             Ok(()) => {
                 // Check if the test case specifies that it should have failed
@@ -238,7 +257,11 @@ impl Case for BlockchainTestCase {
 /// Returns:
 /// - `Ok(())` if all blocks execute successfully.
 /// - `Err(Error)` if any block fails to execute correctly.
-fn run_case(case: &BlockchainTest, last_block_hash: &mut B256) -> Result<(), Error> {
+fn run_case(
+    case: &BlockchainTest,
+    options: BlockTestOptions,
+    last_block_hash: &mut B256,
+) -> Result<(), Error> {
     // Create a new test database and initialize a provider for the test case.
     let chain_spec = case.network.to_chain_spec();
     let factory = create_test_provider_factory_with_chain_spec(chain_spec.clone());
@@ -309,6 +332,7 @@ fn run_case(case: &BlockchainTest, last_block_hash: &mut B256) -> Result<(), Err
             validate_delivered_access_list(block, access_list)
                 .map_err(|err| Error::block_failed(block_number, err))?;
         }
+        report_execution_path(block, access_list.is_some(), options);
 
         // Execute the block
         let state_provider = provider.latest();
@@ -437,6 +461,31 @@ fn validate_delivered_access_list(
     }
     access_list.validate_gas_limit(block.gas_limit).map_err(ConsensusError::from)?;
     Ok(())
+}
+
+/// Reports, on the engine's [`BAL_EXECUTION_PATH_TARGET`], which executor runs the block. Block
+/// import has only the sequential executor, so the reason is the first gate that would also rule
+/// out the parallel one in the engine, or else `block-import`.
+fn report_execution_path(
+    block: &RecoveredBlock<Block>,
+    has_access_list: bool,
+    options: BlockTestOptions,
+) {
+    let reason = if !has_access_list {
+        "no-access-list"
+    } else if options.disable_bal_parallel_execution {
+        "disabled"
+    } else {
+        "block-import"
+    };
+    debug!(
+        target: BAL_EXECUTION_PATH_TARGET,
+        block = block.number,
+        hash = %block.hash(),
+        path = "sequential",
+        reason,
+        "Executing block"
+    );
 }
 
 fn pre_execution_checks(
