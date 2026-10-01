@@ -5,8 +5,7 @@
 //! the [`EngineApi`] handler. The fixture's parameters go, unchanged, through the handler's
 //! JSON-RPC method table for `engine_newPayloadV<n>` and `engine_forkchoiceUpdatedV<n>` at the
 //! versions the fixture names, so the handler's own parameter decoding and version checks run.
-//! No node, RPC server or network is started; each worker reuses one runtime for all its
-//! fixtures.
+//! No node, RPC server or network is started.
 
 use crate::{
     models::{EngineNewPayload, EngineTest},
@@ -82,7 +81,7 @@ const DATABASE_RELEASE_TIMEOUT: Duration = Duration::from_millis(100);
 pub struct EngineTestOptions {
     /// The node's `--engine.disable-bal-parallel-execution`.
     pub disable_bal_parallel_execution: bool,
-    /// How many fixtures run at once, each worker with its own runtime.
+    /// How many fixtures run at once.
     pub workers: usize,
     /// The directory in which each fixture's temporary datadir is created, e.g. a tmpfs.
     pub datadir_root: PathBuf,
@@ -122,7 +121,6 @@ impl EngineTests {
         std::thread::scope(|scope| {
             for _ in 0..options.workers.max(1) {
                 scope.spawn(|| {
-                    let runtime = Runtime::test();
                     let mut datadirs = Vec::new();
                     while let Some(path) = files.lock().unwrap().next() {
                         let tests = match load(&path) {
@@ -138,14 +136,10 @@ impl EngineTests {
                                 &test,
                                 &tree_config,
                                 &options.datadir_root,
-                                &runtime,
                                 &mut datadirs,
                             ));
                         }
                     }
-                    // Background tasks of the last fixtures may still hold their databases.
-                    runtime.graceful_shutdown_with_timeout(ENGINE_SHUTDOWN_TIMEOUT);
-                    runtime.shutdown_timeout(ENGINE_SHUTDOWN_TIMEOUT);
                     for datadir in datadirs {
                         if let Err(err) = fs::remove_dir_all(&datadir) {
                             eprintln!("failed to remove {}: {err}", datadir.display());
@@ -171,27 +165,32 @@ struct Outcome {
     last_payload_status: Option<String>,
 }
 
-/// Runs one fixture against a fresh engine on the worker's runtime. A datadir that background
+/// Runs one fixture against a fresh engine on a runtime of its own. A datadir that background
 /// tasks still use when the fixture ends is added to `datadirs`, for removal at the end of the
 /// run.
+///
+/// The runtime is per fixture because the engine's background tasks can outlive a fixture's
+/// tree by seconds; on a shared runtime with small pools they starve the next fixture's state
+/// root task into its timeout. Shutting the runtime down without waiting stops that.
 fn run_fixture(
     name: String,
     test: &EngineTest,
     tree_config: &TreeConfig,
     datadir_root: &Path,
-    runtime: &Runtime,
     datadirs: &mut Vec<PathBuf>,
 ) -> FixtureResult {
     let fork = format!("{:?}", test.network);
     let mut outcome = Outcome::default();
+    let runtime = Runtime::test();
     let result = runtime.handle().block_on(run_case(
         test,
         tree_config,
         datadir_root,
-        runtime,
+        &runtime,
         &mut outcome,
         datadirs,
     ));
+    runtime.shutdown_timeout(Duration::ZERO);
     let mut result = FixtureResult::new(name, fork, result);
     result.last_block_hash = outcome.last_block_hash;
     result.last_payload_status = outcome.last_payload_status;

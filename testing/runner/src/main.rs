@@ -34,7 +34,7 @@ enum Command {
     EngineTest {
         #[command(flatten)]
         args: RunArgs,
-        /// How many fixtures run at once, each worker with its own runtime.
+        /// How many fixtures run at once.
         #[arg(long, default_value_t = default_workers())]
         workers: usize,
         /// Where each fixture's temporary datadir is created. Defaults to the system temporary
