@@ -3347,6 +3347,8 @@ dependencies = [
 name = "ef-test-runner"
 version = "2.7.0"
 dependencies = [
+ "alloy-consensus",
+ "alloy-eips",
  "alloy-primitives",
  "alloy-rpc-types-engine",
  "clap",
