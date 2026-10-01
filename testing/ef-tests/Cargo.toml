@@ -33,9 +33,20 @@ reth-tracing.workspace = true
 reth-trie.workspace = true
 reth-trie-db.workspace = true
 reth-engine-tree.workspace = true
-reth-node-builder = { workspace = true, features = ["test-utils"] }
+reth-engine-primitives.workspace = true
+reth-eth-wire-types.workspace = true
+reth-network-api.workspace = true
+reth-network-p2p.workspace = true
+reth-node-core.workspace = true
 reth-node-ethereum.workspace = true
+reth-node-types.workspace = true
+reth-payload-builder.workspace = true
+reth-prune.workspace = true
+reth-rpc-api = { workspace = true, features = ["client"] }
+reth-rpc-engine-api.workspace = true
+reth-storage-overlay.workspace = true
 reth-tasks.workspace = true
+reth-transaction-pool.workspace = true
 revm = { workspace = true, features = ["secp256k1", "blst", "c-kzg", "memory_limit", "p256-aws-lc-rs"] }
 
 alloy-rlp.workspace = true
@@ -44,7 +55,12 @@ alloy-eips.workspace = true
 alloy-consensus.workspace = true
 alloy-genesis.workspace = true
 
-jsonrpsee = { workspace = true, features = ["client"] }
+alloy-rpc-types-engine.workspace = true
+futures.workspace = true
+jsonrpsee = { workspace = true, features = ["server-core"] }
+tempfile.workspace = true
+tokio = { workspace = true, features = ["time"] }
+tokio-stream.workspace = true
 tracing.workspace = true
 walkdir.workspace = true
 serde.workspace = true
