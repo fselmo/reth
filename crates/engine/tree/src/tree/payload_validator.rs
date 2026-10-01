@@ -185,6 +185,22 @@ const MAX_EXPECTED_GAS_LIMIT_MULTIPLIER: u64 = 2;
 /// Worker name for deferred trie data preparation.
 const DEFERRED_TRIE_WORKER_NAME: &str = "deferred-trie";
 
+/// Tracing target of the debug event that reports, for each block about to execute, which
+/// executor runs it and, for the sequential one, the first gate that ruled out the BAL path.
+pub const BAL_EXECUTION_PATH_TARGET: &str = "engine::tree::bal_execution_path";
+
+/// The executor chosen for a block by [`BasicEngineValidator::bal_path_eligible`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BalExecutionPath {
+    /// The BAL-driven parallel executor.
+    Parallel,
+    /// The sequential executor, with the first gate that ruled out the parallel one.
+    Sequential {
+        /// `no-access-list` or `disabled`.
+        reason: &'static str,
+    },
+}
+
 type ReceiptRootSender<N> =
     crossbeam_channel::Sender<IndexedReceipt<<N as NodePrimitives>::Receipt>>;
 type ReceiptRootReceiver = tokio::sync::oneshot::Receiver<(B256, alloy_primitives::Bloom)>;
@@ -611,7 +627,8 @@ where
         // Get an iterator over the transactions in the payload
         let txs = self.tx_iterator_for(&input)?;
 
-        let parallel_bal_execution = ensure_ok!(self.bal_path_eligible(env.decoded_bal.as_deref()));
+        let bal_execution_path = ensure_ok!(self.bal_path_eligible(env.decoded_bal.as_deref()));
+        let parallel_bal_execution = bal_execution_path == BalExecutionPath::Parallel;
 
         // Prepare the state-root job before execution so it can provide streaming hooks.
         let mut state_root_job =
@@ -725,6 +742,12 @@ where
         // Execute the block and handle any execution errors.
         // The receipt root task is spawned before execution and receives receipts incrementally
         // as transactions complete, allowing parallel computation during execution.
+        let (path, reason) = match bal_execution_path {
+            BalExecutionPath::Parallel => ("parallel", ""),
+            BalExecutionPath::Sequential { reason } => ("sequential", reason),
+        };
+        let NumHash { number, hash } = input.num_hash();
+        debug!(target: BAL_EXECUTION_PATH_TARGET, block = number, %hash, path, reason, "Executing block");
         let execute_block_start = Instant::now();
         let execution_result = if parallel_bal_execution {
             self.execute_block_bal(env, &input, &handle, &make_state_provider)
@@ -1123,7 +1146,8 @@ where
         Ok((output, senders, result_rx, built_bal))
     }
 
-    /// Returns true when the BAL execute path should be used for this block.
+    /// Returns whether the BAL execute path should be used for this block, or the first gate that
+    /// rules it out.
     // TODO: extend with stronger gating before enabling on mainnet:
     //   - Fork check: `Amsterdam.active_at_timestamp(env.evm_env.timestamp)`. Today a BAL only
     //     exists post-Amsterdam, so the BAL-presence check is a sufficient proxy. It is a proxy,
@@ -1131,17 +1155,24 @@ where
     //   - Tx-count threshold (`bal_execute_path_min_tx_count`): below the parallelism break-even
     //     point, provider setup and worker scheduling overhead can exceed the gain. Tune
     //     empirically once workers are parallel; meaningless while the commit loop is sequential.
-    fn bal_path_eligible(&self, bal: Option<&DecodedBal>) -> Result<bool, InsertBlockErrorKind> {
-        let has_bal = bal.is_some();
-        let parallel_execution = has_bal && !self.config.disable_bal_parallel_execution();
-        if parallel_execution && self.config.disable_bal_parallel_state_root() {
+    fn bal_path_eligible(
+        &self,
+        bal: Option<&DecodedBal>,
+    ) -> Result<BalExecutionPath, InsertBlockErrorKind> {
+        if bal.is_none() {
+            return Ok(BalExecutionPath::Sequential { reason: "no-access-list" })
+        }
+        if self.config.disable_bal_parallel_execution() {
+            return Ok(BalExecutionPath::Sequential { reason: "disabled" })
+        }
+        if self.config.disable_bal_parallel_state_root() {
             return Err(InsertBlockErrorKind::Other(
                 "disabling parallel state root is impossible when parallel execution is enabled"
                     .into(),
             ));
         }
 
-        Ok(parallel_execution)
+        Ok(BalExecutionPath::Parallel)
     }
 
     /// Executes the block on the BAL path. Mirrors the return shape of [`Self::execute_block`]
