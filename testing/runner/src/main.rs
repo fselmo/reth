@@ -55,7 +55,8 @@ struct RunArgs {
     #[arg(long)]
     jsonl: bool,
     /// Run blocks on the sequential executor instead of the BAL-driven parallel one, as the
-    /// node flag of the same name does. Block import always runs the sequential executor.
+    /// node flag of the same name does. Block import has only the sequential executor, so for
+    /// `blocktest` this only changes the reported reason.
     #[arg(long = "engine.disable-bal-parallel-execution")]
     disable_bal_parallel_execution: bool,
 }
