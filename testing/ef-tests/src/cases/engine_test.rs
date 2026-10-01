@@ -62,6 +62,10 @@ use tokio_stream::wrappers::UnboundedReceiverStream;
 /// The cross-block cache size of each fixture's engine, in MB (`--engine.cross-block-cache-size`).
 const CROSS_BLOCK_CACHE_SIZE_MB: usize = 16;
 
+/// The engine tree's persistence threshold (`--engine.persistence-threshold`): more blocks than a
+/// fixture has, so the tree persists them only when it terminates.
+const PERSISTENCE_THRESHOLD: u64 = 1_000_000;
+
 /// How long a fixture's engine tree gets to persist its blocks and stop.
 const ENGINE_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -100,13 +104,16 @@ impl EngineTests {
         options: EngineTestOptions,
         on_result: &(dyn Fn(FixtureResult) + Sync),
     ) {
-        let tree_config = EngineArgs {
+        let engine_args = EngineArgs {
             bal_parallel_execution_disabled: options.disable_bal_parallel_execution,
             // The default 4 GB cache would dominate the memory of concurrent workers.
             cross_block_cache_size: CROSS_BLOCK_CACHE_SIZE_MB,
+            // Keep a fixture's blocks in memory instead of persisting them while it runs.
+            persistence_threshold: PERSISTENCE_THRESHOLD,
             ..Default::default()
-        }
-        .tree_config();
+        };
+        engine_args.validate().expect("the runner's engine arguments are valid");
+        let tree_config = engine_args.tree_config();
         let files = Mutex::new(find_json_files(&self.suite_path).into_iter());
         std::thread::scope(|scope| {
             for _ in 0..options.workers.max(1) {
