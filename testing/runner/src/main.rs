@@ -3,7 +3,10 @@ use std::path::{Path, PathBuf};
 
 use clap::{Args, Parser, Subcommand};
 use ef_tests::{
-    cases::blockchain_test::{BlockTestOptions, BlockchainTests},
+    cases::{
+        blockchain_test::{BlockTestOptions, BlockchainTests},
+        engine_test::{EngineTestOptions, EngineTests},
+    },
     result::{OutputFormat, ResultPrinter},
     Suite,
 };
@@ -26,6 +29,15 @@ enum Command {
     /// Run blockchain tests by importing their blocks.
     #[command(name = "blocktest")]
     BlockTest(RunArgs),
+    /// Run blockchain tests in the engine format through the Engine API of an in-process node.
+    #[command(name = "enginetest")]
+    EngineTest {
+        #[command(flatten)]
+        args: RunArgs,
+        /// How many fixtures run at once, each against its own node.
+        #[arg(long, default_value_t = default_workers())]
+        workers: usize,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -54,6 +66,10 @@ impl RunArgs {
     }
 }
 
+fn default_workers() -> usize {
+    std::thread::available_parallelism().map_or(1, |n| n.get())
+}
+
 fn main() {
     let cmd = TestRunnerCommand::parse();
     let Some(command) = cmd.command else {
@@ -68,6 +84,16 @@ fn main() {
             let suite = BlockchainTests::new(fixtures_path(&args.path, "blockchain_tests"));
             let options = BlockTestOptions {
                 disable_bal_parallel_execution: args.disable_bal_parallel_execution,
+            };
+            let printer = ResultPrinter::new(args.output_format());
+            suite.run_fixtures(options, &|result| printer.push(result));
+            printer.finish();
+        }
+        Command::EngineTest { args, workers } => {
+            let suite = EngineTests::new(fixtures_path(&args.path, "blockchain_tests_engine"));
+            let options = EngineTestOptions {
+                disable_bal_parallel_execution: args.disable_bal_parallel_execution,
+                workers,
             };
             let printer = ResultPrinter::new(args.output_format());
             suite.run_fixtures(options, &|result| printer.push(result));
