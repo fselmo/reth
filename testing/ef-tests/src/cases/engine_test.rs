@@ -63,7 +63,7 @@ use std::{
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
 /// The cross-block cache size of each fixture's engine, in MB (`--engine.cross-block-cache-size`).
-const CROSS_BLOCK_CACHE_SIZE_MB: usize = 16;
+const CROSS_BLOCK_CACHE_SIZE_MB: usize = 1;
 
 /// The engine tree's persistence threshold (`--engine.persistence-threshold`): more blocks than a
 /// fixture has, so the tree persists them only when it terminates.
@@ -71,10 +71,6 @@ const PERSISTENCE_THRESHOLD: u64 = 1_000_000;
 
 /// How long a fixture's engine tree gets to persist its blocks and stop.
 const ENGINE_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// How long to wait for background tasks to release a fixture's database before leaving its
-/// datadir for the worker to remove at the end of the run.
-const DATABASE_RELEASE_TIMEOUT: Duration = Duration::from_millis(100);
 
 /// Options for running engine tests.
 #[derive(Debug, Clone)]
@@ -121,7 +117,7 @@ impl EngineTests {
         std::thread::scope(|scope| {
             for _ in 0..options.workers.max(1) {
                 scope.spawn(|| {
-                    let mut datadirs = Vec::new();
+                    let mut cleanup = Cleanup::default();
                     while let Some(path) = files.lock().unwrap().next() {
                         let tests = match load(&path) {
                             Ok(tests) => tests,
@@ -131,20 +127,14 @@ impl EngineTests {
                             }
                         };
                         for (name, test) in tests {
-                            on_result(run_fixture(
-                                name,
-                                &test,
-                                &tree_config,
-                                &options.datadir_root,
-                                &mut datadirs,
-                            ));
+                            let (result, remains) =
+                                run_fixture(name, &test, &tree_config, &options.datadir_root);
+                            on_result(result);
+                            cleanup.remains.push(remains);
+                            cleanup.sweep();
                         }
                     }
-                    for datadir in datadirs {
-                        if let Err(err) = fs::remove_dir_all(&datadir) {
-                            eprintln!("failed to remove {}: {err}", datadir.display());
-                        }
-                    }
+                    cleanup.finish();
                 });
             }
         });
@@ -165,36 +155,99 @@ struct Outcome {
     last_payload_status: Option<String>,
 }
 
-/// Runs one fixture against a fresh engine on a runtime of its own. A datadir that background
-/// tasks still use when the fixture ends is added to `datadirs`, for removal at the end of the
-/// run.
+/// What a fixture leaves behind: its runtime, on which the engine's background tasks can run
+/// for seconds after the tree stopped, and its datadir.
+struct Remains {
+    runtime: Runtime,
+    db: Option<Arc<DatabaseEnv>>,
+    datadir: Option<PathBuf>,
+}
+
+impl Remains {
+    /// Whether the background tasks released the fixture's database.
+    fn is_released(&self) -> bool {
+        self.db.as_ref().is_none_or(|db| Arc::strong_count(db) == 1)
+    }
+
+    /// Drops the runtime, joining its threads, and tries to remove the datadir. Returns the
+    /// datadir if a task still writing to it made the removal fail.
+    fn clear(self) -> Option<PathBuf> {
+        let Self { runtime, db, datadir } = self;
+        drop(db);
+        drop(runtime);
+        datadir.filter(|datadir| fs::remove_dir_all(datadir).is_err())
+    }
+}
+
+/// What a worker still has to clean up.
+#[derive(Default)]
+struct Cleanup {
+    remains: Vec<Remains>,
+    datadirs: Vec<PathBuf>,
+}
+
+impl Cleanup {
+    /// Clears the remains whose database was released and retries the datadirs that could not be
+    /// removed yet.
+    fn sweep(&mut self) {
+        let (released, pending): (Vec<_>, Vec<_>) =
+            std::mem::take(&mut self.remains).into_iter().partition(Remains::is_released);
+        self.remains = pending;
+        self.datadirs.retain(|datadir| fs::remove_dir_all(datadir).is_err());
+        self.datadirs.extend(released.into_iter().filter_map(Remains::clear));
+    }
+
+    /// Sweeps until everything is cleaned up or [`ENGINE_SHUTDOWN_TIMEOUT`] passes, then clears
+    /// what is left and reports the datadirs that could not be removed.
+    fn finish(mut self) {
+        let deadline = std::time::Instant::now() + ENGINE_SHUTDOWN_TIMEOUT;
+        self.sweep();
+        while !(self.remains.is_empty() && self.datadirs.is_empty()) &&
+            std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(10));
+            self.sweep();
+        }
+        self.datadirs.extend(self.remains.into_iter().filter_map(Remains::clear));
+        for datadir in self.datadirs {
+            if let Err(err) = fs::remove_dir_all(&datadir) {
+                eprintln!("failed to remove {}: {err}", datadir.display());
+            }
+        }
+    }
+}
+
+/// Runs one fixture against a fresh engine on a runtime of its own, and returns what it leaves
+/// behind.
 ///
 /// The runtime is per fixture because the engine's background tasks can outlive a fixture's
-/// tree by seconds; on a shared runtime with small pools they starve the next fixture's state
-/// root task into its timeout. Shutting the runtime down without waiting stops that.
+/// tree by seconds, and on a runtime shared with the next fixtures they slowed those by seconds.
+/// The runtime's async tasks stop with the fixture; it is dropped, and the datadir removed, once
+/// the remaining tasks released the database, from the worker thread rather than from one of
+/// the runtime's own threads, which could not join itself.
 fn run_fixture(
     name: String,
     test: &EngineTest,
     tree_config: &TreeConfig,
     datadir_root: &Path,
-    datadirs: &mut Vec<PathBuf>,
-) -> FixtureResult {
+) -> (FixtureResult, Remains) {
     let fork = format!("{:?}", test.network);
     let mut outcome = Outcome::default();
     let runtime = Runtime::test();
+    let mut remains = Remains { runtime: runtime.clone(), db: None, datadir: None };
     let result = runtime.handle().block_on(run_case(
         test,
         tree_config,
         datadir_root,
         &runtime,
         &mut outcome,
-        datadirs,
+        &mut remains,
     ));
     runtime.shutdown_timeout(Duration::ZERO);
     let mut result = FixtureResult::new(name, fork, result);
     result.last_block_hash = outcome.last_block_hash;
     result.last_payload_status = outcome.last_payload_status;
-    result
+    (result, remains)
 }
 
 type FixtureNode = NodeTypesWithDBAdapter<EthereumNode, Arc<DatabaseEnv>>;
@@ -205,7 +258,7 @@ async fn run_case(
     datadir_root: &Path,
     runtime: &Runtime,
     outcome: &mut Outcome,
-    datadirs: &mut Vec<PathBuf>,
+    remains: &mut Remains,
 ) -> Result<(), Error> {
     let chain_spec = Arc::new(test.chain_spec());
     let genesis_hash = chain_spec.genesis_hash();
@@ -221,18 +274,11 @@ async fn run_case(
         .tempdir_in(datadir_root)
         .map_err(|err| Error::Assertion(format!("failed to create a datadir: {err}")))?
         .keep();
-    let engine = match Engine::start(chain_spec, &datadir, tree_config, runtime) {
-        Ok(engine) => engine,
-        Err(err) => {
-            datadirs.push(datadir);
-            return Err(err)
-        }
-    };
+    remains.datadir = Some(datadir.clone());
+    let engine = Engine::start(chain_spec, &datadir, tree_config, runtime)?;
     let result = drive(&engine.rpc, test, outcome).await;
     outcome.last_block_hash = engine.provider.chain_info().ok().map(|info| info.best_hash);
-    if !engine.stop().await || fs::remove_dir_all(&datadir).is_err() {
-        datadirs.push(datadir);
-    }
+    remains.db = Some(engine.stop().await);
     result?;
 
     match outcome.last_block_hash {
@@ -374,8 +420,8 @@ impl Engine {
     }
 
     /// Asks the engine tree to persist its blocks and stop, as a node does on shutdown, and
-    /// returns whether the database was released, so the datadir can be removed.
-    async fn stop(self) -> bool {
+    /// returns the database, which background tasks may still hold.
+    async fn stop(self) -> Arc<DatabaseEnv> {
         let Self { rpc, provider, db, handler, to_handler } = self;
         drop(rpc);
         let (tx, rx) = tokio::sync::oneshot::channel();
@@ -385,11 +431,7 @@ impl Engine {
         handler.abort();
         let _ = handler.await;
         drop(provider);
-        let deadline = tokio::time::Instant::now() + DATABASE_RELEASE_TIMEOUT;
-        while Arc::strong_count(&db) > 1 && tokio::time::Instant::now() < deadline {
-            tokio::time::sleep(Duration::from_millis(1)).await;
-        }
-        Arc::strong_count(&db) == 1
+        db
     }
 }
 
