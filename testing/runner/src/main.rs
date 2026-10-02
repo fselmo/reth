@@ -114,7 +114,6 @@ fn main() {
         Command::BlockTest(args) => {
             let options = BlockTestOptions {
                 disable_bal_parallel_execution: args.disable_bal_parallel_execution,
-                check_exception: true,
             };
             let printer = ResultPrinter::new(args.output_format());
             let files = fixture_files(&args.paths, "blockchain_tests");

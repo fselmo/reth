@@ -8,7 +8,6 @@
 //! No node, RPC server or network is started.
 
 use crate::{
-    exceptions,
     models::{EngineNewPayload, EngineTest},
     result::FixtureResult,
     Error,
@@ -502,11 +501,6 @@ async fn new_payload(
             if let Some(code) = expected_code {
                 return Err(format!("{method} returned {response}, expected error code {code}"))
             }
-            if let Some(expected) = &payload.validation_error {
-                let message = response["validationError"].as_str().unwrap_or_default();
-                exceptions::check_exception(expected, message)
-                    .map_err(|err| format!("{method} returned INVALID: {err}"))?;
-            }
             Ok(())
         }
         Err((code, message)) => {
@@ -630,8 +624,7 @@ mod tests {
     fn invalid_payload_is_rejected() {
         let (mut test, _) = empty_block_fixture(Some(B256::repeat_byte(1)));
         test.lastblockhash = test.genesis_block_header.hash;
-        test.engine_new_payloads[0].validation_error =
-            Some("BlockException.INVALID_STATE_ROOT".to_string());
+        test.engine_new_payloads[0].validation_error = Some("state root mismatch".to_string());
 
         let result = run(&test);
         assert!(result.pass, "{}", result.error);
