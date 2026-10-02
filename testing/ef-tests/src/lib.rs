@@ -16,6 +16,7 @@ pub mod suite;
 
 pub mod assert;
 pub mod cases;
+pub mod exceptions;
 pub mod models;
 
 pub use case::{Case, Cases};

@@ -1,6 +1,7 @@
 //! Test runners for `BlockchainTests` in <https://github.com/ethereum/tests>
 
 use crate::{
+    exceptions,
     models::{BlockchainTest, ForkSpec},
     result::{find_json_files, FixtureResult},
     Case, Error, Suite,
@@ -23,7 +24,7 @@ use reth_evm::{
     ConfigureEvm,
 };
 use reth_evm_ethereum::EthEvmConfig;
-use reth_primitives_traits::{ParallelBridgeBuffered, RecoveredBlock, SealedBlock};
+use reth_primitives_traits::{GotExpected, ParallelBridgeBuffered, RecoveredBlock, SealedBlock};
 use reth_provider::{
     test_utils::create_test_provider_factory_with_chain_spec, BlockWriter, DatabaseProviderFactory,
     ExecutionOutcome, HashedPostStateProvider, HistoryWriter, OriginalValuesKnown, StateProvider,
@@ -106,6 +107,9 @@ pub struct BlockTestOptions {
     /// The node's `--engine.disable-bal-parallel-execution`. Block import always runs the
     /// sequential executor, so this only changes the reported reason.
     pub disable_bal_parallel_execution: bool,
+    /// Whether a block that a fixture expects to fail must fail for the reason it names, as
+    /// mapped by [`exceptions`]. Off by default, so [`Suite::run`] checks only that it failed.
+    pub check_exception: bool,
 }
 
 /// An Ethereum blockchain test.
@@ -187,7 +191,19 @@ impl BlockchainTestCase {
             Err(Error::BlockProcessingFailed { block_number, err }) => {
                 match expectation {
                     // It happened on exactly the block we were told to fail on
-                    Some((expected, _)) if block_number == expected => Ok(()),
+                    Some((expected, msg)) if block_number == expected => {
+                        if options.check_exception {
+                            exceptions::check_exception(&msg, &error_chain(err.as_ref())).map_err(
+                                |err| {
+                                    Error::Assertion(format!(
+                                        "Test case: {name}\nBlock {block_number}: {err}"
+                                    ))
+                                },
+                            )
+                        } else {
+                            Ok(())
+                        }
+                    }
 
                     // Uncle side‑chain edge case, we accept as long as it failed.
                     // But we don't check the exact block number.
@@ -371,7 +387,9 @@ fn run_case(
         if computed_state_root != block.state_root {
             return Err(Error::block_failed(
                 block_number,
-                Error::Assertion("state root mismatch".to_string()),
+                ConsensusError::BodyStateRootDiff(
+                    GotExpected { got: computed_state_root, expected: block.state_root }.into(),
+                ),
             ));
         }
 
@@ -422,6 +440,21 @@ fn run_case(
     }
 
     Ok(())
+}
+
+/// The error's message followed by each of its sources' messages that it does not already contain.
+fn error_chain(err: &(dyn std::error::Error + 'static)) -> String {
+    let mut message = err.to_string();
+    let mut source = err.source();
+    while let Some(err) = source {
+        let next = err.to_string();
+        if !message.contains(&next) {
+            message.push_str(": ");
+            message.push_str(&next);
+        }
+        source = err.source();
+    }
+    message
 }
 
 fn decode_blocks(
@@ -638,7 +671,8 @@ mod tests {
 
     #[test]
     fn dropped_access_list_is_reported_before_the_switch() {
-        let disabled = BlockTestOptions { disable_bal_parallel_execution: true };
+        let disabled =
+            BlockTestOptions { disable_bal_parallel_execution: true, ..Default::default() };
         let default = BlockTestOptions::default();
         assert_eq!(execution_path_reason(false, false, disabled), "no-access-list");
         assert_eq!(execution_path_reason(true, false, disabled), "bad-access-list");

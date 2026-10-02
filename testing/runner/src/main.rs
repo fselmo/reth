@@ -104,6 +104,7 @@ fn main() {
             let suite = BlockchainTests::new(fixtures_path(&args.path, "blockchain_tests"));
             let options = BlockTestOptions {
                 disable_bal_parallel_execution: args.disable_bal_parallel_execution,
+                check_exception: true,
             };
             let printer = ResultPrinter::new(args.output_format());
             suite.run_fixtures(options, &|result| printer.push(result));
