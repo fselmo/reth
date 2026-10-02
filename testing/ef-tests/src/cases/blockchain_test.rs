@@ -192,7 +192,9 @@ impl BlockchainTestCase {
                 match expectation {
                     // It happened on exactly the block we were told to fail on
                     Some((expected, msg)) if block_number == expected => {
-                        if options.check_exception {
+                        // No exception name covers decoder errors, so a block that does not
+                        // decode counts as rejected for whatever reason the fixture expects.
+                        if options.check_exception && !err.is::<BlockDecodeError>() {
                             exceptions::check_exception(&msg, &error_chain(err.as_ref())).map_err(
                                 |err| {
                                     Error::Assertion(format!(
@@ -457,6 +459,11 @@ fn error_chain(err: &(dyn std::error::Error + 'static)) -> String {
     message
 }
 
+/// A block whose RLP does not decode.
+#[derive(Debug, thiserror::Error)]
+#[error("failed to decode block: {0}")]
+struct BlockDecodeError(alloy_rlp::Error);
+
 fn decode_blocks(
     test_case_blocks: &[crate::models::Block],
 ) -> Result<Vec<RecoveredBlock<Block>>, Error> {
@@ -467,7 +474,7 @@ fn decode_blocks(
         let block_number = (block_index + 1) as u64;
 
         let decoded = SealedBlock::<Block>::decode(&mut block.rlp.as_ref())
-            .map_err(|err| Error::block_failed(block_number, err))?;
+            .map_err(|err| Error::block_failed(block_number, BlockDecodeError(err)))?;
 
         let recovered_block =
             decoded.try_recover().map_err(|err| Error::block_failed(block_number, err))?;

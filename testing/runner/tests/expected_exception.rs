@@ -62,3 +62,20 @@ fn enginetest_checks_the_reason() {
         "enginetest_bad_state_root.json",
     );
 }
+
+/// A block that does not decode counts as rejected, whatever exception the fixture names.
+#[test]
+fn blocktest_accepts_any_reason_for_an_undecodable_block() {
+    let name = "blocktest_bad_state_root.json";
+    let json = fs::read_to_string(fixture(name)).unwrap();
+    let truncated = json
+        .replace("84342770c0c0c0\"", "84342770c0c0\"")
+        .replace("BlockException.INVALID_STATE_ROOT", "BlockException.RLP_STRUCTURES_ENCODING");
+    assert_ne!(truncated, json);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(name);
+    fs::write(&path, truncated).unwrap();
+
+    let result = run(&["blocktest"], &path);
+    assert_eq!(result["pass"], true, "{}", result["error"]);
+}
