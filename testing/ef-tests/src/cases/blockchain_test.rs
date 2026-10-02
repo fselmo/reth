@@ -5,7 +5,10 @@ use crate::{
     result::{find_json_files, FixtureResult},
     Case, Error, Suite,
 };
-use alloy_eip7928::{bal::Bal, BlockAccessList};
+use alloy_eip7928::{
+    bal::{Bal, RawBal},
+    BlockAccessList,
+};
 use alloy_primitives::B256;
 use alloy_rlp::Decodable;
 use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator};
@@ -20,7 +23,7 @@ use reth_evm::{
     ConfigureEvm,
 };
 use reth_evm_ethereum::EthEvmConfig;
-use reth_primitives_traits::{GotExpected, ParallelBridgeBuffered, RecoveredBlock, SealedBlock};
+use reth_primitives_traits::{ParallelBridgeBuffered, RecoveredBlock, SealedBlock};
 use reth_provider::{
     test_utils::create_test_provider_factory_with_chain_spec, BlockWriter, DatabaseProviderFactory,
     ExecutionOutcome, HashedPostStateProvider, HistoryWriter, OriginalValuesKnown, StateProvider,
@@ -325,14 +328,15 @@ fn run_case(
 
         // Like a block downloaded with its access list, the delivered list counts only when the
         // header commits to one.
-        let access_list = case.blocks[block_index]
+        let delivered = case.blocks[block_index]
             .access_list()
             .filter(|_| block.block_access_list_hash.is_some());
-        if let Some(access_list) = access_list {
-            validate_delivered_access_list(block, access_list)
-                .map_err(|err| Error::block_failed(block_number, err))?;
-        }
-        report_execution_path(block, access_list.is_some(), options);
+        let access_list = delivered
+            .map(|access_list| check_delivered_access_list(block, access_list))
+            .transpose()
+            .map_err(|err| Error::block_failed(block_number, err))?
+            .flatten();
+        report_execution_path(block, delivered.is_some(), access_list.is_some(), options);
 
         // Execute the block
         let state_provider = provider.latest();
@@ -441,26 +445,24 @@ fn decode_blocks(
     Ok(blocks)
 }
 
-/// Checks the access list delivered beside a block the way the engine checks one downloaded with
-/// it: the list must decode, match the hash in the header and fit the block's gas limit.
-fn validate_delivered_access_list(
+/// Checks the access list delivered beside a block the way reth's sync checks one downloaded with
+/// it. A list whose RLP, in the order delivered, does not hash to the header's commitment, or that
+/// does not decode, is dropped (`Ok(None)`) and the block is judged on its header alone. A matching
+/// list is committed to by the header, so it must also fit the block's gas limit.
+fn check_delivered_access_list(
     block: &RecoveredBlock<Block>,
     access_list: &serde_json::Value,
-) -> Result<(), Error> {
-    let access_list: Bal = serde_json::from_value::<BlockAccessList>(access_list.clone())
-        .map_err(|err| Error::Assertion(format!("undecodable block access list: {err}")))?
-        .into();
-    let hash = access_list.compute_hash();
-    if let Some(expected) = block.block_access_list_hash &&
-        hash != expected
-    {
-        return Err(ConsensusError::BlockAccessListHashMismatch(
-            GotExpected { got: hash, expected }.into(),
-        )
-        .into())
+) -> Result<Option<Bal>, ConsensusError> {
+    let Some(expected) = block.block_access_list_hash else { return Ok(None) };
+    let Ok(access_list) = serde_json::from_value::<BlockAccessList>(access_list.clone()) else {
+        return Ok(None)
+    };
+    if RawBal::new(alloy_rlp::encode(&access_list).into()).ensure_hash(expected).is_err() {
+        return Ok(None)
     }
-    access_list.validate_gas_limit(block.gas_limit).map_err(ConsensusError::from)?;
-    Ok(())
+    let access_list = Bal::from(access_list);
+    access_list.validate_gas_limit(block.gas_limit)?;
+    Ok(Some(access_list))
 }
 
 /// Reports, on the engine's [`BAL_EXECUTION_PATH_TARGET`], which executor runs the block. Block
@@ -468,16 +470,11 @@ fn validate_delivered_access_list(
 /// out the parallel one in the engine, or else `block-import`.
 fn report_execution_path(
     block: &RecoveredBlock<Block>,
-    has_access_list: bool,
+    delivered: bool,
+    attached: bool,
     options: BlockTestOptions,
 ) {
-    let reason = if !has_access_list {
-        "no-access-list"
-    } else if options.disable_bal_parallel_execution {
-        "disabled"
-    } else {
-        "block-import"
-    };
+    let reason = execution_path_reason(delivered, attached, options);
     debug!(
         target: BAL_EXECUTION_PATH_TARGET,
         block = block.number,
@@ -486,6 +483,24 @@ fn report_execution_path(
         reason,
         "Executing block"
     );
+}
+
+/// The engine's gates in its order, the access list before the switch. A delivered list that was
+/// dropped is reported as `bad-access-list`, which therefore also comes before `disabled`.
+const fn execution_path_reason(
+    delivered: bool,
+    attached: bool,
+    options: BlockTestOptions,
+) -> &'static str {
+    if !delivered {
+        "no-access-list"
+    } else if !attached {
+        "bad-access-list"
+    } else if options.disable_bal_parallel_execution {
+        "disabled"
+    } else {
+        "block-import"
+    }
 }
 
 fn pre_execution_checks(
@@ -608,13 +623,27 @@ mod tests {
     }
 
     #[test]
-    fn delivered_access_list_is_checked() {
+    fn delivered_access_list_is_dropped_unless_it_matches() {
         let block = block_committing_to(&access_list("0x1"), 30_000_000);
-        assert!(validate_delivered_access_list(&block, &access_list("0x1")).is_ok());
-        assert!(validate_delivered_access_list(&block, &access_list("0x2")).is_err());
-        assert!(validate_delivered_access_list(&block, &json!({"address": "0x01"})).is_err());
+        assert!(check_delivered_access_list(&block, &access_list("0x1")).unwrap().is_some());
+        assert!(check_delivered_access_list(&block, &access_list("0x2")).unwrap().is_none());
+        let undecodable = json!({"address": "0x01"});
+        assert!(check_delivered_access_list(&block, &undecodable).unwrap().is_none());
 
+        // A matching list is committed to by the header, so it still fails the gas limit.
         let block = block_committing_to(&access_list("0x1"), 1);
-        assert!(validate_delivered_access_list(&block, &access_list("0x1")).is_err());
+        assert!(check_delivered_access_list(&block, &access_list("0x1")).is_err());
+        assert!(check_delivered_access_list(&block, &access_list("0x2")).unwrap().is_none());
+    }
+
+    #[test]
+    fn dropped_access_list_is_reported_before_the_switch() {
+        let disabled = BlockTestOptions { disable_bal_parallel_execution: true };
+        let default = BlockTestOptions::default();
+        assert_eq!(execution_path_reason(false, false, disabled), "no-access-list");
+        assert_eq!(execution_path_reason(true, false, disabled), "bad-access-list");
+        assert_eq!(execution_path_reason(true, false, default), "bad-access-list");
+        assert_eq!(execution_path_reason(true, true, disabled), "disabled");
+        assert_eq!(execution_path_reason(true, true, default), "block-import");
     }
 }
