@@ -3362,6 +3362,7 @@ dependencies = [
  "reth-engine-tree",
  "serde",
  "serde_json",
+ "tempfile",
  "tracing",
  "tracing-subscriber",
 ]
