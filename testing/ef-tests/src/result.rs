@@ -6,7 +6,10 @@ use reth_provider::ProviderError;
 use serde::Serialize;
 use std::{
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Mutex,
+    },
 };
 use thiserror::Error;
 use walkdir::{DirEntry, WalkDir};
@@ -156,16 +159,20 @@ pub enum OutputFormat {
 pub struct ResultPrinter {
     format: OutputFormat,
     results: Mutex<Vec<FixtureResult>>,
+    any_failed: AtomicBool,
 }
 
 impl ResultPrinter {
     /// Creates a printer for the given format.
     pub const fn new(format: OutputFormat) -> Self {
-        Self { format, results: Mutex::new(Vec::new()) }
+        Self { format, results: Mutex::new(Vec::new()), any_failed: AtomicBool::new(false) }
     }
 
     /// Records one result, printing it right away in [`OutputFormat::Jsonl`].
     pub fn push(&self, result: FixtureResult) {
+        if !result.pass {
+            self.any_failed.store(true, Ordering::Relaxed);
+        }
         match self.format {
             OutputFormat::JsonArray => self.results.lock().unwrap().push(result),
             OutputFormat::Jsonl => {
@@ -175,12 +182,14 @@ impl ResultPrinter {
         }
     }
 
-    /// Prints the JSON array in [`OutputFormat::JsonArray`].
-    pub fn finish(self) {
+    /// Prints the JSON array in [`OutputFormat::JsonArray`] and returns whether every result
+    /// passed.
+    pub fn finish(self) -> bool {
         if self.format == OutputFormat::JsonArray {
             let results = self.results.into_inner().unwrap();
             println!("{}", serde_json::to_string(&results).expect("results serialize"));
         }
+        !self.any_failed.into_inner()
     }
 }
 

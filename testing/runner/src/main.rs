@@ -35,10 +35,11 @@ pub struct TestRunnerCommand {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Run blockchain tests by importing their blocks.
+    /// Run blockchain tests by importing their blocks. Exits 1 if any fixture fails.
     #[command(name = "blocktest", display_name = "ef-test-runner")]
     BlockTest(RunArgs),
-    /// Run blockchain tests in the engine format through reth's Engine API handler.
+    /// Run blockchain tests in the engine format through reth's Engine API handler. Exits 1 if
+    /// any fixture fails.
     #[command(name = "enginetest", display_name = "ef-test-runner")]
     EngineTest {
         #[command(flatten)]
@@ -109,7 +110,7 @@ fn main() {
     if args.bal_report {
         report::init();
     }
-    match command {
+    let all_passed = match command {
         Command::BlockTest(args) => {
             let options = BlockTestOptions {
                 disable_bal_parallel_execution: args.disable_bal_parallel_execution,
@@ -118,7 +119,7 @@ fn main() {
             let printer = ResultPrinter::new(args.output_format());
             let files = fixture_files(&args.paths, "blockchain_tests");
             BlockchainTests::run_fixtures(files, options, &|result| printer.push(result));
-            printer.finish();
+            printer.finish()
         }
         Command::EngineTest { args, workers, datadir_root } => {
             let options = EngineTestOptions {
@@ -129,8 +130,11 @@ fn main() {
             let printer = ResultPrinter::new(args.output_format());
             let files = fixture_files(&args.paths, "blockchain_tests_engine");
             EngineTests::run_fixtures(files, options, &|result| printer.push(result));
-            printer.finish();
+            printer.finish()
         }
+    };
+    if !all_passed {
+        std::process::exit(1);
     }
 }
 

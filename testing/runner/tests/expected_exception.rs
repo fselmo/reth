@@ -12,7 +12,8 @@ fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(name)
 }
 
-/// Runs the runner with `args` on `fixture` and returns its one result.
+/// Runs the runner with `args` on `fixture`, checks that it exits 0 exactly when the fixture
+/// passed, and returns its one result.
 fn run(args: &[&str], fixture: &Path) -> serde_json::Value {
     let output = Command::new(env!("CARGO_BIN_EXE_ef-test-runner"))
         .args(&args[..1])
@@ -20,10 +21,17 @@ fn run(args: &[&str], fixture: &Path) -> serde_json::Value {
         .args(&args[1..])
         .output()
         .unwrap();
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     let mut results: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(results.len(), 1);
-    results.remove(0)
+    let result = results.remove(0);
+    let expected_code = if result["pass"] == true { 0 } else { 1 };
+    assert_eq!(
+        output.status.code(),
+        Some(expected_code),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    result
 }
 
 /// Runs the fixture as is, which passes, and with its expected exception swapped for another,
