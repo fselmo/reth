@@ -3,6 +3,7 @@
 
 use serde_json::Value;
 use std::{
+    fs,
     path::{Path, PathBuf},
     process::Command,
 };
@@ -100,5 +101,37 @@ fn enginetest_rejects_a_bad_access_list_on_either_executor() {
         let (result, _) = run(args);
         assert_eq!(result["pass"], true, "{args:?}: {}", result["error"]);
         assert_eq!(result["lastPayloadStatus"], "INVALID", "{args:?}");
+    }
+}
+
+/// Block import attaches the delivered list when it hashes to the header's commitment, and drops
+/// it otherwise, including when only the order of its entries differs. A dropped list does not
+/// change the verdict, which follows the header.
+#[test]
+fn blocktest_drops_a_reordered_access_list() {
+    let fixture = fixture("blocktest_amsterdam_empty_block.json");
+    let fixture = fixture.to_str().unwrap();
+    assert_eq!(
+        decisions(&["blocktest", fixture, "--bal-report"]),
+        decision("sequential", "block-import")
+    );
+    assert_eq!(
+        decisions(&["blocktest", fixture, "--bal-report", SEQUENTIAL]),
+        decision("sequential", "disabled")
+    );
+
+    let mut json: Value = serde_json::from_str(&fs::read_to_string(fixture).unwrap()).unwrap();
+    let test = json.as_object_mut().unwrap().values_mut().next().unwrap();
+    let access_list = test["blocks"][0]["blockAccessList"].as_array_mut().unwrap();
+    assert!(access_list.len() > 1);
+    access_list.reverse();
+    let dir = tempfile::tempdir().unwrap();
+    let reordered = dir.path().join("reordered.json");
+    fs::write(&reordered, json.to_string()).unwrap();
+    let reordered = reordered.to_str().unwrap();
+
+    for mode in [&[][..], &[SEQUENTIAL]] {
+        let args = [&["blocktest", reordered, "--bal-report"][..], mode].concat();
+        assert_eq!(decisions(&args), decision("sequential", "bad-access-list"), "{mode:?}");
     }
 }

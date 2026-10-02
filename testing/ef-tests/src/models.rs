@@ -200,7 +200,7 @@ pub struct Block {
     /// Withdrawals
     pub withdrawals: Option<Withdrawals>,
     /// The block's access list (EIP-7928), delivered beside the block. Kept as JSON so that a
-    /// malformed list fails its block instead of the whole file.
+    /// malformed list is dropped instead of failing the whole file.
     pub block_access_list: Option<serde_json::Value>,
     /// The decoded fields of a block that is expected to be invalid.
     #[serde(rename = "rlp_decoded")]
