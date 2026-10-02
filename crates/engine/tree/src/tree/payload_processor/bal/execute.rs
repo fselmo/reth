@@ -28,7 +28,8 @@ use super::{
 };
 use alloy_eip7928::{
     bal::{Bal as AlloyBal, DecodedBal},
-    compute_block_access_list_hash, BlockAccessList,
+    compute_block_access_list_hash, AccountChanges, BlockAccessIndex, BlockAccessList,
+    BlockAccessListChangeKind, BlockAccessListValidationError,
 };
 use alloy_evm::{
     block::{BlockExecutionError, BlockExecutor, BlockValidationError, TxResult},
@@ -46,7 +47,7 @@ use revm::{
     database::{states::bundle_state::BundleRetention, State},
     state::bal::Bal as RevmBal,
 };
-use std::sync::Arc;
+use std::{cmp::Ordering, sync::Arc};
 
 use crate::tree::payload_processor::receipt_root_task::IndexedReceipt;
 
@@ -229,6 +230,11 @@ where
 }
 
 fn convert_alloy_to_revm_bal(alloy_bal: &AlloyBal) -> Result<Arc<RevmBal>, BalExecutionError> {
+    // revm reads a value as the last write before the transaction's index, which assumes every
+    // change list ascends by block access index as EIP-7928 requires. An unordered list would hand
+    // a later transaction the wrong pre-state, so it is rejected before execution.
+    ensure_change_lists_ascending(alloy_bal.as_vec()).map_err(BlockAccessListDecodeError::new)?;
+
     // Convert the BAL from alloy to a BAL that can be consumed by revm, that is more amenable
     // for state lookups.
     //
@@ -244,6 +250,73 @@ fn convert_alloy_to_revm_bal(alloy_bal: &AlloyBal) -> Result<Arc<RevmBal>, BalEx
     let received_bal_revm =
         RevmBal::clone_from_alloy(alloy_bal.as_vec()).map_err(BlockAccessListDecodeError::new)?;
     Ok(Arc::new(received_bal_revm))
+}
+
+/// Checks that every change list in the BAL is strictly ascending by block access index.
+///
+/// Account and storage key order are left to the BAL hash check, since revm keys those by address
+/// and slot rather than reading them in order.
+fn ensure_change_lists_ascending(
+    bal: &[AccountChanges],
+) -> Result<(), BlockAccessListValidationError> {
+    for account in bal {
+        let address = account.address;
+        for slot_changes in &account.storage_changes {
+            ensure_ascending(
+                address,
+                BlockAccessListChangeKind::Storage,
+                slot_changes.changes.iter().map(|change| change.block_access_index),
+            )?;
+        }
+        ensure_ascending(
+            address,
+            BlockAccessListChangeKind::Balance,
+            account.balance_changes.iter().map(|change| change.block_access_index),
+        )?;
+        ensure_ascending(
+            address,
+            BlockAccessListChangeKind::Nonce,
+            account.nonce_changes.iter().map(|change| change.block_access_index),
+        )?;
+        ensure_ascending(
+            address,
+            BlockAccessListChangeKind::Code,
+            account.code_changes.iter().map(|change| change.block_access_index),
+        )?;
+    }
+    Ok(())
+}
+
+fn ensure_ascending(
+    address: Address,
+    kind: BlockAccessListChangeKind,
+    indices: impl IntoIterator<Item = BlockAccessIndex>,
+) -> Result<(), BlockAccessListValidationError> {
+    let mut previous = None::<BlockAccessIndex>;
+    for index in indices {
+        if let Some(previous) = previous {
+            match previous.cmp(&index) {
+                Ordering::Less => {}
+                Ordering::Equal => {
+                    return Err(BlockAccessListValidationError::DuplicateBlockAccessIndex {
+                        address,
+                        kind,
+                        index,
+                    })
+                }
+                Ordering::Greater => {
+                    return Err(BlockAccessListValidationError::ChangeIndicesOutOfOrder {
+                        address,
+                        kind,
+                        previous,
+                        index,
+                    })
+                }
+            }
+        }
+        previous = Some(index);
+    }
+    Ok(())
 }
 
 fn take_built_bal_and_log_divergence<DB>(
@@ -377,6 +450,7 @@ mod tests {
     use alloy_consensus::{BlockHeader, Header, TxLegacy};
     use alloy_eip7928::{
         bal::Bal as AlloyBal, AccountChanges, BlockAccessIndex, BlockAccessList, CodeChange,
+        NonceChange, SlotChanges, StorageChange,
     };
     use alloy_eips::{
         eip2935::{HISTORY_STORAGE_ADDRESS, HISTORY_STORAGE_CODE},
@@ -502,6 +576,62 @@ mod tests {
             error.ensure_validation_error(),
             Ok(InsertBlockValidationError::BlockAccessListDecode(_))
         ));
+    }
+
+    #[test]
+    fn unordered_bal_change_list_is_validation_error() {
+        let (first, second) = (BlockAccessIndex::new(1), BlockAccessIndex::new(2));
+        let out_of_order = AccountChanges {
+            address: Address::ZERO,
+            nonce_changes: vec![NonceChange::new(second, 2), NonceChange::new(first, 1)],
+            ..Default::default()
+        };
+        let duplicate = AccountChanges {
+            address: Address::ZERO,
+            storage_changes: vec![SlotChanges::new(
+                U256::ZERO,
+                vec![
+                    StorageChange::new(first, U256::from(1)),
+                    StorageChange::new(first, U256::from(2)),
+                ],
+            )],
+            ..Default::default()
+        };
+        let cases = [
+            (
+                out_of_order,
+                BlockAccessListValidationError::ChangeIndicesOutOfOrder {
+                    address: Address::ZERO,
+                    kind: BlockAccessListChangeKind::Nonce,
+                    previous: second,
+                    index: first,
+                },
+            ),
+            (
+                duplicate,
+                BlockAccessListValidationError::DuplicateBlockAccessIndex {
+                    address: Address::ZERO,
+                    kind: BlockAccessListChangeKind::Storage,
+                    index: first,
+                },
+            ),
+        ];
+
+        for (account, expected) in cases {
+            let error = convert_alloy_to_revm_bal(&vec![account].into()).unwrap_err();
+            let BalExecutionError::BlockAccessListDecode(decode_error) = &error else {
+                panic!("expected a BAL decode error, got {error:?}");
+            };
+            assert_eq!(
+                core::error::Error::source(decode_error)
+                    .and_then(|source| source.downcast_ref::<BlockAccessListValidationError>()),
+                Some(&expected)
+            );
+            assert!(matches!(
+                InsertBlockErrorKind::from(error).ensure_validation_error(),
+                Ok(InsertBlockValidationError::BlockAccessListDecode(_))
+            ));
+        }
     }
 
     #[test]
