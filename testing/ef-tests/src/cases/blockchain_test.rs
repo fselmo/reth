@@ -3,7 +3,7 @@
 use crate::{
     case::load_json,
     models::{BlockchainTest, ForkSpec},
-    result::FixtureResult,
+    result::{FixtureResult, Rejection},
     suite::find_all_files_with_extension,
     Case, Error, Suite,
 };
@@ -24,7 +24,7 @@ use reth_evm::{
     ConfigureEvm,
 };
 use reth_evm_ethereum::EthEvmConfig;
-use reth_primitives_traits::{ParallelBridgeBuffered, RecoveredBlock, SealedBlock};
+use reth_primitives_traits::{GotExpected, ParallelBridgeBuffered, RecoveredBlock, SealedBlock};
 use reth_provider::{
     test_utils::create_test_provider_factory_with_chain_spec, BlockWriter, DatabaseProviderFactory,
     ExecutionOutcome, HashedPostStateProvider, HistoryWriter, OriginalValuesKnown, StateProvider,
@@ -85,14 +85,18 @@ impl BlockchainTests {
                     continue
                 }
                 let mut last_block_hash = test.genesis_block_header.hash;
+                let mut rejections = Vec::new();
                 let result = BlockchainTestCase::run_single_case_with(
                     &name,
                     &test,
                     options,
                     &mut last_block_hash,
+                    &mut rejections,
                 );
                 on_result(
-                    FixtureResult::new(name, fork, result).with_last_block_hash(last_block_hash),
+                    FixtureResult::new(name, fork, result)
+                        .with_last_block_hash(last_block_hash)
+                        .with_rejections(rejections),
                 );
             }
         });
@@ -165,19 +169,34 @@ impl BlockchainTestCase {
     /// expectations encoded in the JSON file.
     pub fn run_single_case(name: &str, case: &BlockchainTest) -> Result<(), Error> {
         let mut last_block_hash = B256::ZERO;
-        Self::run_single_case_with(name, case, BlockTestOptions::default(), &mut last_block_hash)
+        Self::run_single_case_with(
+            name,
+            case,
+            BlockTestOptions::default(),
+            &mut last_block_hash,
+            &mut Vec::new(),
+        )
     }
 
     /// Like [`Self::run_single_case`], with the given options. `last_block_hash` is set to the
-    /// hash of the last block that was imported, or of genesis if none was.
+    /// hash of the last block that was imported, or of genesis if none was, and the block that
+    /// was rejected, if any, is added to `rejections` with reth's error.
     pub fn run_single_case_with(
         name: &str,
         case: &BlockchainTest,
         options: BlockTestOptions,
         last_block_hash: &mut B256,
+        rejections: &mut Vec<Rejection>,
     ) -> Result<(), Error> {
         let expectation = Self::expected_failure(case);
-        match run_case(case, options, last_block_hash) {
+        let result = run_case(case, options, last_block_hash);
+        // Block number 0 is the genesis setup, not a fixture block.
+        if let Err(Error::BlockProcessingFailed { block_number, err }) = &result &&
+            *block_number > 0
+        {
+            rejections.push(rejection(case, *block_number, err.to_string()));
+        }
+        match result {
             // All blocks executed successfully.
             Ok(()) => {
                 // Check if the test case specifies that it should have failed
@@ -377,7 +396,9 @@ fn run_case(
         if computed_state_root != block.state_root {
             return Err(Error::block_failed(
                 block_number,
-                Error::Assertion("state root mismatch".to_string()),
+                ConsensusError::BodyStateRootDiff(
+                    GotExpected { got: computed_state_root, expected: block.state_root }.into(),
+                ),
             ));
         }
 
@@ -428,6 +449,18 @@ fn run_case(
     }
 
     Ok(())
+}
+
+/// The rejection of the fixture block with the given number, counted from 1, with its hash if
+/// it decodes.
+fn rejection(case: &BlockchainTest, block_number: u64, error: String) -> Rejection {
+    let index = (block_number - 1) as usize;
+    let hash = case
+        .blocks
+        .get(index)
+        .and_then(|block| SealedBlock::<Block>::decode(&mut block.rlp.as_ref()).ok())
+        .map(|block| block.hash());
+    Rejection { index, hash, error }
 }
 
 fn decode_blocks(
