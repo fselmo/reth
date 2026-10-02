@@ -1,6 +1,8 @@
 //! Checks the verdict on a block the client rejects: it depends on whether the fixture expects a
-//! rejection, never on the reason it names, and the exit status agrees with it.
+//! rejection, never on the reason it names, and the exit status agrees with it. The result reports
+//! the rejection with reth's own error.
 
+use serde_json::json;
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -52,11 +54,17 @@ fn edited(
     path
 }
 
+/// reth's error for the fixtures' block.
+const STATE_ROOT_ERROR: &str = "mismatched block state root: got \
+    0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421, expected \
+    0x0101010101010101010101010101010101010101010101010101010101010101";
+
 /// Runs the fixture as is, with its expected exception swapped for another, both of which pass,
-/// and without an expected exception, which fails.
-fn check(args: &[&str], name: &str, exception_key: &str) {
+/// and without an expected exception, which fails. Each reports the block's `rejection`.
+fn check(args: &[&str], name: &str, exception_key: &str, rejection: serde_json::Value) {
     let result = run(args, &fixture(name));
     assert_eq!(result["pass"], true, "{}", result["error"]);
+    assert_eq!(result["rejections"], json!([rejection]));
 
     let dir = tempfile::tempdir().unwrap();
     let other_reason = edited(dir.path(), name, |block| {
@@ -67,17 +75,28 @@ fn check(args: &[&str], name: &str, exception_key: &str) {
     });
     let result = run(args, &other_reason);
     assert_eq!(result["pass"], true, "{}", result["error"]);
+    assert_eq!(result["rejections"], json!([rejection]));
 
     let expected_valid = edited(dir.path(), name, |block| {
         block.remove(exception_key);
     });
     let result = run(args, &expected_valid);
     assert_eq!(result["pass"], false);
+    assert_eq!(result["rejections"], json!([rejection]));
 }
 
 #[test]
 fn blocktest_rejected_block() {
-    check(&["blocktest"], "blocktest_bad_state_root.json", "expectException");
+    check(
+        &["blocktest"],
+        "blocktest_bad_state_root.json",
+        "expectException",
+        json!({
+            "index": 0,
+            "hash": "0x91883d9ff958b92d75733d3d8385e0b6fe583bc220dacc0b13046a932ed33847",
+            "error": STATE_ROOT_ERROR,
+        }),
+    );
 }
 
 #[test]
@@ -88,5 +107,36 @@ fn enginetest_rejected_payload() {
         &["enginetest", "--workers", "1", "--datadir-root", datadir_root],
         "enginetest_bad_state_root.json",
         "validationError",
+        json!({"index": 0, "error": STATE_ROOT_ERROR}),
     );
+}
+
+/// A block that does not decode is reported with the decoder's error and no hash.
+#[test]
+fn blocktest_undecodable_block() {
+    let dir = tempfile::tempdir().unwrap();
+    let truncated = edited(dir.path(), "blocktest_bad_state_root.json", |block| {
+        let rlp = block["rlp"].as_str().unwrap();
+        let rlp = rlp.strip_suffix("c0").unwrap().to_string();
+        block.insert("rlp".to_string(), rlp.into());
+    });
+    let result = run(&["blocktest"], &truncated);
+    assert_eq!(result["pass"], true, "{}", result["error"]);
+    assert_eq!(result["rejections"], json!([{"index": 0, "error": "input too short"}]));
+}
+
+#[test]
+fn clean_fixtures_report_no_rejections() {
+    let result = run(&["blocktest"], &fixture("blocktest_empty_block.json"));
+    assert_eq!(result["pass"], true, "{}", result["error"]);
+    assert_eq!(result["rejections"], json!([]));
+
+    let datadir_root = tempfile::tempdir().unwrap();
+    let datadir_root = datadir_root.path().to_str().unwrap();
+    let result = run(
+        &["enginetest", "--workers", "1", "--datadir-root", datadir_root],
+        &fixture("enginetest_empty_block.json"),
+    );
+    assert_eq!(result["pass"], true, "{}", result["error"]);
+    assert_eq!(result["rejections"], json!([]));
 }

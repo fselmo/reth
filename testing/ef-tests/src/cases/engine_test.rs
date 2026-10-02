@@ -9,7 +9,7 @@
 
 use crate::{
     models::{EngineNewPayload, EngineTest},
-    result::FixtureResult,
+    result::{FixtureResult, Rejection},
     Error,
 };
 use alloy_primitives::B256;
@@ -149,6 +149,7 @@ fn load(path: &Path) -> Result<BTreeMap<String, EngineTest>, Error> {
 struct Outcome {
     last_block_hash: Option<B256>,
     last_payload_status: Option<String>,
+    rejections: Vec<Rejection>,
 }
 
 /// What a fixture leaves behind: its runtime, on which the engine's background tasks can run
@@ -240,7 +241,7 @@ fn run_fixture(
         &mut remains,
     ));
     runtime.shutdown_timeout(Duration::ZERO);
-    let mut result = FixtureResult::new(name, fork, result);
+    let mut result = FixtureResult::new(name, fork, result).with_rejections(outcome.rejections);
     result.last_block_hash = outcome.last_block_hash;
     result.last_payload_status = outcome.last_payload_status;
     (result, remains)
@@ -441,7 +442,7 @@ async fn drive(rpc: &RpcModule<()>, test: &EngineTest, outcome: &mut Outcome) ->
         .map_err(|err| Error::Assertion(format!("forkchoice update to genesis: {err}")))?;
 
     for (idx, payload) in test.engine_new_payloads.iter().enumerate() {
-        new_payload(rpc, payload, outcome)
+        new_payload(rpc, idx, payload, outcome)
             .await
             .map_err(|err| Error::Assertion(format!("payload {idx}: {err}")))?;
         if payload.validation_error.is_none() && payload.error_code.is_none() {
@@ -457,28 +458,58 @@ async fn drive(rpc: &RpcModule<()>, test: &EngineTest, outcome: &mut Outcome) ->
     Ok(())
 }
 
+/// A JSON-RPC error returned by the handler.
+#[derive(Debug)]
+struct RpcError {
+    code: i64,
+    message: String,
+    data: Option<Value>,
+}
+
+impl RpcError {
+    const fn new(code: i64, message: String) -> Self {
+        Self { code, message, data: None }
+    }
+}
+
+impl std::fmt::Display for RpcError {
+    /// Formats the error as `<code>: <message>`, followed by `: <data>` when it carries data: a
+    /// string as is, anything else as compact JSON.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.code, self.message)?;
+        match &self.data {
+            None | Some(Value::Null) => Ok(()),
+            Some(Value::String(data)) => write!(f, ": {data}"),
+            Some(data) => write!(f, ": {data}"),
+        }
+    }
+}
+
 /// Calls a method of the handler with raw JSON parameters, as a JSON-RPC request would, and
-/// returns its result or its error code and message.
-async fn call(rpc: &RpcModule<()>, method: &str, params: Value) -> Result<Value, (i64, String)> {
+/// returns its result or its error.
+async fn call(rpc: &RpcModule<()>, method: &str, params: Value) -> Result<Value, RpcError> {
     let request = json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params});
     let (response, _) = rpc
         .raw_json_request(&request.to_string(), 1)
         .await
-        .map_err(|err| (0, format!("invalid request: {err}")))?;
+        .map_err(|err| RpcError::new(0, format!("invalid request: {err}")))?;
     let mut response: Value =
-        serde_json::from_str(response.get()).map_err(|err| (0, err.to_string()))?;
-    if let Some(error) = response.get("error") {
-        return Err((
-            error["code"].as_i64().unwrap_or_default(),
-            error["message"].as_str().unwrap_or_default().to_string(),
-        ))
+        serde_json::from_str(response.get()).map_err(|err| RpcError::new(0, err.to_string()))?;
+    if let Some(error) = response.get_mut("error") {
+        return Err(RpcError {
+            code: error["code"].as_i64().unwrap_or_default(),
+            message: error["message"].as_str().unwrap_or_default().to_string(),
+            data: error.get_mut("data").map(Value::take),
+        })
     }
     Ok(response["result"].take())
 }
 
-/// Calls `engine_newPayloadV<n>` and checks the response against the fixture's expectation.
+/// Calls `engine_newPayloadV<n>` with the fixture's payload at `index`, records a rejection
+/// with reth's error, and checks the response against the fixture's expectation.
 async fn new_payload(
     rpc: &RpcModule<()>,
+    index: usize,
     payload: &EngineNewPayload,
     outcome: &mut Outcome,
 ) -> Result<(), String> {
@@ -494,6 +525,10 @@ async fn new_payload(
         Ok(response) => {
             let status = response["status"].as_str().unwrap_or_default().to_string();
             outcome.last_payload_status = Some(status.clone());
+            if matches!(status.as_str(), "INVALID" | "INVALID_BLOCK_HASH") {
+                let error = response["validationError"].as_str().unwrap_or_default().to_string();
+                outcome.rejections.push(Rejection { index, hash: None, error });
+            }
             let expected = if payload.validation_error.is_some() { "INVALID" } else { "VALID" };
             if status != expected {
                 return Err(format!("{method} returned {response}, expected status {expected}"))
@@ -503,12 +538,14 @@ async fn new_payload(
             }
             Ok(())
         }
-        Err((code, message)) => {
+        Err(err) => {
+            let code = err.code;
             outcome.last_payload_status = Some(format!("error {code}"));
+            outcome.rejections.push(Rejection { index, hash: None, error: err.to_string() });
             if expected_code == Some(code) {
                 Ok(())
             } else {
-                Err(format!("{method} failed with error {code}: {message}"))
+                Err(format!("{method} failed with error {code}: {}", err.message))
             }
         }
     }
@@ -524,7 +561,7 @@ async fn forkchoice_updated(rpc: &RpcModule<()>, version: &str, head: B256) -> R
     });
     let response = call(rpc, &method, json!([state, null]))
         .await
-        .map_err(|(code, message)| format!("{method} failed with error {code}: {message}"))?;
+        .map_err(|err| format!("{method} failed with error {}: {}", err.code, err.message))?;
     match response["payloadStatus"]["status"].as_str() {
         Some("VALID") => Ok(()),
         _ => Err(format!("{method} returned {response}, expected status VALID")),
@@ -618,6 +655,7 @@ mod tests {
         assert!(result.pass, "{}", result.error);
         assert_eq!(result.last_block_hash, Some(block_hash));
         assert_eq!(result.last_payload_status.as_deref(), Some("VALID"));
+        assert_eq!(result.rejections, []);
     }
 
     #[test]
@@ -630,6 +668,24 @@ mod tests {
         assert!(result.pass, "{}", result.error);
         assert_eq!(result.last_block_hash, Some(test.genesis_block_header.hash));
         assert_eq!(result.last_payload_status.as_deref(), Some("INVALID"));
+        let [rejection] = result.rejections.as_slice() else { panic!("{:?}", result.rejections) };
+        assert_eq!(rejection.index, 0);
+        assert!(rejection.error.contains("mismatched block state root"), "{}", rejection.error);
+    }
+
+    #[test]
+    fn payload_rejected_with_an_rpc_error() {
+        // Paris has no `engine_newPayloadV3`, and V3 takes three parameters, not one.
+        let (mut test, _) = empty_block_fixture(None);
+        test.lastblockhash = test.genesis_block_header.hash;
+        test.engine_new_payloads[0].new_payload_version = "3".to_string();
+        test.engine_new_payloads[0].error_code = Some("-32602".to_string());
+
+        let result = run(&test);
+        assert!(result.pass, "{}", result.error);
+        let [rejection] = result.rejections.as_slice() else { panic!("{:?}", result.rejections) };
+        assert_eq!(rejection.index, 0);
+        assert!(rejection.error.starts_with("-32602: "), "{}", rejection.error);
     }
 
     #[test]
