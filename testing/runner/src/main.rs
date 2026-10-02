@@ -10,12 +10,18 @@ use ef_tests::{
     result::{OutputFormat, ResultPrinter},
     Suite,
 };
+use reth_node_core::version::version_metadata;
 
 mod report;
 
 /// Command-line arguments for the test runner.
 #[derive(Debug, Parser)]
-#[command(args_conflicts_with_subcommands = true)]
+#[command(
+    name = "ef-test-runner",
+    version = version_metadata().short_version.as_ref(),
+    propagate_version = true,
+    args_conflicts_with_subcommands = true
+)]
 pub struct TestRunnerCommand {
     #[command(subcommand)]
     command: Option<Command>,
@@ -27,10 +33,10 @@ pub struct TestRunnerCommand {
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Run blockchain tests by importing their blocks.
-    #[command(name = "blocktest")]
+    #[command(name = "blocktest", display_name = "ef-test-runner")]
     BlockTest(RunArgs),
     /// Run blockchain tests in the engine format through reth's Engine API handler.
-    #[command(name = "enginetest")]
+    #[command(name = "enginetest", display_name = "ef-test-runner")]
     EngineTest {
         #[command(flatten)]
         args: RunArgs,

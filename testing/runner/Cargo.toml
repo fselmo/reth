@@ -12,6 +12,7 @@ exclude.workspace = true
 clap = { workspace = true, features = ["derive"] }
 ef-tests.path = "../ef-tests"
 reth-engine-tree.workspace = true
+reth-node-core.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 tracing.workspace = true

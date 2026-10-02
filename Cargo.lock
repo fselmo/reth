@@ -3360,6 +3360,7 @@ dependencies = [
  "clap",
  "ef-tests",
  "reth-engine-tree",
+ "reth-node-core",
  "serde",
  "serde_json",
  "tempfile",
