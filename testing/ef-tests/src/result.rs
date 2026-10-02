@@ -110,6 +110,22 @@ pub struct FixtureResult {
     pub last_payload_status: Option<String>,
     /// Why the fixture failed, empty if it passed.
     pub error: String,
+    /// Every block or payload the client rejected, in fixture order, whether or not the fixture
+    /// expected it.
+    pub rejections: Vec<Rejection>,
+}
+
+/// A block or payload the client rejected, with the client's own error, so that a consumer can
+/// check the reason against the fixture's expected exception.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Rejection {
+    /// The block's position in the fixture's `blocks`, or the payload's in `engineNewPayloads`.
+    pub index: usize,
+    /// The rejected block's hash, when the client computed one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hash: Option<B256>,
+    /// The client's error, verbatim.
+    pub error: String,
 }
 
 impl FixtureResult {
@@ -123,6 +139,7 @@ impl FixtureResult {
             last_block_hash: None,
             last_payload_status: None,
             error,
+            rejections: Vec::new(),
         }
     }
 
@@ -134,6 +151,12 @@ impl FixtureResult {
     /// Sets the hash of the client's head block.
     pub const fn with_last_block_hash(mut self, hash: B256) -> Self {
         self.last_block_hash = Some(hash);
+        self
+    }
+
+    /// Sets the blocks or payloads the client rejected.
+    pub fn with_rejections(mut self, rejections: Vec<Rejection>) -> Self {
+        self.rejections = rejections;
         self
     }
 }
