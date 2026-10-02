@@ -10,7 +10,7 @@
 use crate::{
     exceptions,
     models::{EngineNewPayload, EngineTest},
-    result::{find_json_files, FixtureResult},
+    result::FixtureResult,
     Error,
 };
 use alloy_primitives::B256;
@@ -85,26 +85,18 @@ pub struct EngineTestOptions {
 
 /// A handler for blockchain tests in the engine format.
 #[derive(Debug)]
-pub struct EngineTests {
-    suite_path: PathBuf,
-}
+pub struct EngineTests;
 
 impl EngineTests {
-    /// Creates a handler for the fixtures under `suite_path`, which may also be a single file.
-    pub const fn new(suite_path: PathBuf) -> Self {
-        Self { suite_path }
-    }
-
-    /// Runs every fixture in the JSON files under the suite path and passes one result per
-    /// fixture to `on_result` as it completes. A file that fails to load is reported as a failed
-    /// result.
+    /// Runs every fixture in the JSON `files` and passes one result per fixture to `on_result`
+    /// as it completes. A file that fails to load is reported as a failed result.
     pub fn run_fixtures(
-        &self,
+        files: Vec<PathBuf>,
         options: EngineTestOptions,
         on_result: &(dyn Fn(FixtureResult) + Sync),
     ) {
         let tree_config = tree_config(options.disable_bal_parallel_execution);
-        let files = Mutex::new(find_json_files(&self.suite_path).into_iter());
+        let files = Mutex::new(files.into_iter());
         std::thread::scope(|scope| {
             for _ in 0..options.workers.max(1) {
                 scope.spawn(|| {

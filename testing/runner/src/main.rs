@@ -1,5 +1,8 @@
 //! Command-line interface for running tests.
-use std::path::{Path, PathBuf};
+use std::{
+    fs, io,
+    path::{Path, PathBuf},
+};
 
 use clap::{Args, Parser, Subcommand};
 use ef_tests::{
@@ -7,7 +10,7 @@ use ef_tests::{
         blockchain_test::{BlockTestOptions, BlockchainTests},
         engine_test::{EngineTestOptions, EngineTests},
     },
-    result::{OutputFormat, ResultPrinter},
+    result::{find_json_files, OutputFormat, ResultPrinter},
     Suite,
 };
 use reth_node_core::version::version_metadata;
@@ -52,8 +55,9 @@ enum Command {
 
 #[derive(Debug, Args)]
 struct RunArgs {
-    /// A fixture file, or a directory searched for fixture files.
-    path: PathBuf,
+    /// Fixture files, or directories searched for fixture files, all run in one process.
+    #[arg(required = true)]
+    paths: Vec<PathBuf>,
     /// Print the results as one JSON array on stdout, once all fixtures ran (the default).
     #[arg(long, conflicts_with = "jsonl")]
     json_array: bool,
@@ -96,32 +100,52 @@ fn main() {
     let args = match &command {
         Command::BlockTest(args) | Command::EngineTest { args, .. } => args,
     };
+    for path in &args.paths {
+        if let Err(err) = check_readable(path) {
+            eprintln!("error: cannot read {}: {err}", path.display());
+            std::process::exit(2);
+        }
+    }
     if args.bal_report {
         report::init();
     }
     match command {
         Command::BlockTest(args) => {
-            let suite = BlockchainTests::new(fixtures_path(&args.path, "blockchain_tests"));
             let options = BlockTestOptions {
                 disable_bal_parallel_execution: args.disable_bal_parallel_execution,
                 check_exception: true,
             };
             let printer = ResultPrinter::new(args.output_format());
-            suite.run_fixtures(options, &|result| printer.push(result));
+            let files = fixture_files(&args.paths, "blockchain_tests");
+            BlockchainTests::run_fixtures(files, options, &|result| printer.push(result));
             printer.finish();
         }
         Command::EngineTest { args, workers, datadir_root } => {
-            let suite = EngineTests::new(fixtures_path(&args.path, "blockchain_tests_engine"));
             let options = EngineTestOptions {
                 disable_bal_parallel_execution: args.disable_bal_parallel_execution,
                 workers,
                 datadir_root,
             };
             let printer = ResultPrinter::new(args.output_format());
-            suite.run_fixtures(options, &|result| printer.push(result));
+            let files = fixture_files(&args.paths, "blockchain_tests_engine");
+            EngineTests::run_fixtures(files, options, &|result| printer.push(result));
             printer.finish();
         }
     }
+}
+
+/// Returns an error if `path` does not exist or cannot be read.
+fn check_readable(path: &Path) -> io::Result<()> {
+    if path.is_dir() {
+        fs::read_dir(path).map(drop)
+    } else {
+        fs::File::open(path).map(drop)
+    }
+}
+
+/// Returns every fixture file under `paths`, in order.
+fn fixture_files(paths: &[PathBuf], format: &str) -> Vec<PathBuf> {
+    paths.iter().flat_map(|path| find_json_files(&fixtures_path(path, format))).collect()
 }
 
 /// Returns the `format` directory of a fixtures release if `path` is one, otherwise `path`.
