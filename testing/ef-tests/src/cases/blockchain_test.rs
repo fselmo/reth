@@ -486,16 +486,15 @@ fn check_delivered_access_list(
     block: &RecoveredBlock<Block>,
     access_list: &serde_json::Value,
 ) -> Result<Option<Bal>, ConsensusError> {
-    let Some(expected) = block.block_access_list_hash else { return Ok(None) };
-    let Ok(access_list) = serde_json::from_value::<BlockAccessList>(access_list.clone()) else {
-        return Ok(None)
-    };
-    if RawBal::new(alloy_rlp::encode(&access_list).into()).ensure_hash(expected).is_err() {
-        return Ok(None)
+    if let Some(expected) = block.block_access_list_hash &&
+        let Ok(access_list) = serde_json::from_value::<BlockAccessList>(access_list.clone()) &&
+        RawBal::new(alloy_rlp::encode(&access_list).into()).ensure_hash(expected).is_ok()
+    {
+        let access_list = Bal::from(access_list);
+        access_list.validate_gas_limit(block.gas_limit)?;
+        return Ok(Some(access_list))
     }
-    let access_list = Bal::from(access_list);
-    access_list.validate_gas_limit(block.gas_limit)?;
-    Ok(Some(access_list))
+    Ok(None)
 }
 
 /// Reports, on the engine's [`BAL_EXECUTION_PATH_TARGET`], which executor runs the block. Block

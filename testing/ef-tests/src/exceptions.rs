@@ -7,6 +7,7 @@
 
 use regex::Regex;
 use std::sync::LazyLock;
+use Pattern::{Regex as R, Substring as S};
 
 /// How an exception is recognized in an error message.
 #[derive(Debug, Clone, Copy)]
@@ -16,8 +17,6 @@ enum Pattern {
     /// This regex matches somewhere in the message (EEST's `mapping_regex`).
     Regex(&'static str),
 }
-
-use Pattern::{Regex as R, Substring as S};
 
 const MAPPING: &[(&str, Pattern)] = &[
     // mapping_substring
