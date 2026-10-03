@@ -2,7 +2,7 @@
 
 use crate::{assert::assert_equal, Error};
 use alloy_consensus::Header as RethHeader;
-use alloy_eips::{eip4895::Withdrawals, eip7840::BlobParams};
+use alloy_eips::{eip4895::Withdrawals, eip7840::BlobParams, eip7892::BlobScheduleBlobParams};
 use alloy_genesis::{Genesis, GenesisAccount};
 use alloy_primitives::{keccak256, map::HashMap, Address, Bloom, Bytes, B256, B64, U256};
 use reth_chainspec::{ChainSpec, ChainSpecBuilder, EthereumHardfork, ForkCondition};
@@ -72,7 +72,10 @@ impl EngineTest {
             .with_blob_gas_used(header.blob_gas_used.map(|gas| gas.to()))
             .with_slot_number(header.slot_number.map(|slot| slot.to()))
             .extend_accounts(self.pre.clone().into_genesis_state());
-        self.network.chain_spec_builder().genesis(genesis).build()
+        ChainSpec {
+            blob_params: self.network.blob_params(),
+            ..self.network.chain_spec_builder().genesis(genesis).build()
+        }
     }
 }
 
@@ -396,8 +399,20 @@ pub enum ForkSpec {
     CancunToPragueAtTime15k,
     /// Prague
     Prague,
+    /// Prague to Osaka at time 15k
+    PragueToOsakaAtTime15k,
     /// Osaka
     Osaka,
+    /// Osaka to BPO1 at time 15k
+    OsakaToBPO1AtTime15k,
+    /// BPO1 to BPO2 at time 15k
+    BPO1ToBPO2AtTime15k,
+    /// BPO2 to BPO3 at time 15k
+    BPO2ToBPO3AtTime15k,
+    /// BPO3 to BPO4 at time 15k
+    BPO3ToBPO4AtTime15k,
+    /// BPO2 to Amsterdam at time 15k
+    BPO2ToAmsterdamAtTime15k,
     /// Amsterdam
     Amsterdam,
 }
@@ -418,13 +433,39 @@ impl ForkSpec {
     }
 
     fn to_chain_spec_inner(self) -> ChainSpec {
-        let mut spec = self.chain_spec_builder().build();
+        ChainSpec { blob_params: self.blob_params(), ..self.chain_spec_builder().build() }
+    }
 
-        // Amsterdam follows BPO1 and BPO2, so its fixtures use BPO2's blob parameters.
-        if self == Self::Amsterdam {
-            spec.blob_params = spec.blob_params.with_scheduled([(0, BlobParams::bpo2())]);
-        }
-        spec
+    /// Returns the blob parameters of this fork spec, with those of its BPO forks scheduled at
+    /// their activation times.
+    ///
+    /// BPO3 and BPO4 are not scheduled on mainnet; their parameters are the ones the
+    /// execution-spec-tests fixtures use.
+    pub fn blob_params(self) -> BlobScheduleBlobParams {
+        let bpo3 = BlobParams {
+            target_blob_count: 21,
+            max_blob_count: 32,
+            update_fraction: 20_609_697,
+            ..BlobParams::osaka()
+        };
+        let bpo4 = BlobParams {
+            target_blob_count: 14,
+            max_blob_count: 21,
+            update_fraction: 13_739_630,
+            ..BlobParams::osaka()
+        };
+        let scheduled = match self {
+            Self::OsakaToBPO1AtTime15k => vec![(15_000, BlobParams::bpo1())],
+            Self::BPO1ToBPO2AtTime15k => {
+                vec![(0, BlobParams::bpo1()), (15_000, BlobParams::bpo2())]
+            }
+            Self::BPO2ToBPO3AtTime15k => vec![(0, BlobParams::bpo2()), (15_000, bpo3)],
+            Self::BPO3ToBPO4AtTime15k => vec![(0, bpo3), (15_000, bpo4)],
+            // Amsterdam follows BPO1 and BPO2, so its fixtures use BPO2's blob parameters.
+            Self::BPO2ToAmsterdamAtTime15k | Self::Amsterdam => vec![(0, BlobParams::bpo2())],
+            _ => Vec::new(),
+        };
+        BlobScheduleBlobParams::default().with_scheduled(scheduled)
     }
 
     /// Returns a builder of the chain spec with the hardforks of this fork spec, on the mainnet
@@ -479,7 +520,33 @@ impl ForkSpec {
                 .cancun_activated()
                 .with_fork(EthereumHardfork::Prague, ForkCondition::Timestamp(15_000)),
             Self::Prague => spec_builder.prague_activated(),
+            Self::PragueToOsakaAtTime15k => spec_builder
+                .prague_activated()
+                .with_fork(EthereumHardfork::Osaka, ForkCondition::Timestamp(15_000)),
             Self::Osaka => spec_builder.osaka_activated(),
+            Self::OsakaToBPO1AtTime15k => spec_builder
+                .osaka_activated()
+                .with_fork(EthereumHardfork::Bpo1, ForkCondition::Timestamp(15_000)),
+            Self::BPO1ToBPO2AtTime15k => spec_builder
+                .osaka_activated()
+                .with_fork(EthereumHardfork::Bpo1, ForkCondition::Timestamp(0))
+                .with_fork(EthereumHardfork::Bpo2, ForkCondition::Timestamp(15_000)),
+            Self::BPO2ToBPO3AtTime15k => spec_builder
+                .osaka_activated()
+                .with_fork(EthereumHardfork::Bpo1, ForkCondition::Timestamp(0))
+                .with_fork(EthereumHardfork::Bpo2, ForkCondition::Timestamp(0))
+                .with_fork(EthereumHardfork::Bpo3, ForkCondition::Timestamp(15_000)),
+            Self::BPO3ToBPO4AtTime15k => spec_builder
+                .osaka_activated()
+                .with_fork(EthereumHardfork::Bpo1, ForkCondition::Timestamp(0))
+                .with_fork(EthereumHardfork::Bpo2, ForkCondition::Timestamp(0))
+                .with_fork(EthereumHardfork::Bpo3, ForkCondition::Timestamp(0))
+                .with_fork(EthereumHardfork::Bpo4, ForkCondition::Timestamp(15_000)),
+            Self::BPO2ToAmsterdamAtTime15k => spec_builder
+                .osaka_activated()
+                .with_fork(EthereumHardfork::Bpo1, ForkCondition::Timestamp(0))
+                .with_fork(EthereumHardfork::Bpo2, ForkCondition::Timestamp(0))
+                .with_fork(EthereumHardfork::Amsterdam, ForkCondition::Timestamp(15_000)),
             Self::Amsterdam => spec_builder.amsterdam_activated(),
         }
     }
