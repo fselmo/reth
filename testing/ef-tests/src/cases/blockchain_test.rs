@@ -4,7 +4,6 @@ use crate::{
     case::load_json,
     models::{BlockchainTest, ForkSpec},
     result::{FixtureResult, Rejection},
-    suite::find_all_files_with_extension,
     Case, Error, Suite,
 };
 use alloy_eip7928::{
@@ -58,18 +57,16 @@ impl BlockchainTests {
         Self { suite_path }
     }
 
-    /// Runs every fixture in the JSON files under the suite path, which may also be a single
-    /// file, and passes one result per fixture to `on_result` as it completes.
+    /// Runs every fixture in the JSON `files` and passes one result per fixture to `on_result`
+    /// as it completes.
     ///
     /// Unlike [`Suite::run`], this reports a file that fails to load as a failed result instead
     /// of panicking.
     pub fn run_fixtures(
-        &self,
+        files: Vec<PathBuf>,
         options: BlockTestOptions,
         on_result: &(dyn Fn(FixtureResult) + Sync),
     ) {
-        let mut files = find_all_files_with_extension(&self.suite_path, ".json");
-        files.sort();
         files.into_par_iter().for_each(|path| {
             let case = match BlockchainTestCase::load(&path) {
                 Ok(case) => case,
