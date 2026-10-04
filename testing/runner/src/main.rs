@@ -52,6 +52,10 @@ struct RunArgs {
     /// `blocktest` this only changes the reported reason.
     #[arg(long = "engine.disable-bal-parallel-execution")]
     disable_bal_parallel_execution: bool,
+    /// Print a `balExecution` JSON line on stderr for each executed block, saying which executor
+    /// ran it and, for the sequential one, why.
+    #[arg(long)]
+    bal_report: bool,
 }
 
 fn default_workers() -> usize {
@@ -66,7 +70,12 @@ fn main() {
         return
     };
 
-    report::init();
+    let args = match &command {
+        Command::BlockTest(args) | Command::EngineTest { args, .. } => args,
+    };
+    if args.bal_report {
+        report::init();
+    }
     let results = Mutex::new(Vec::new());
     let on_result = |result: FixtureResult| results.lock().unwrap().push(result);
     match command {
