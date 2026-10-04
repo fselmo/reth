@@ -1,6 +1,7 @@
 //! Test runners for `BlockchainTests` in <https://github.com/ethereum/tests>
 
 use crate::{
+    case::load_json,
     models::{BlockchainTest, ForkSpec},
     result::FixtureResult,
     suite::find_all_files_with_extension,
@@ -32,7 +33,6 @@ use reth_trie::StateRoot;
 use reth_trie_db::DatabaseStateRoot;
 use std::{
     collections::BTreeMap,
-    fs,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -221,15 +221,7 @@ impl BlockchainTestCase {
 
 impl Case for BlockchainTestCase {
     fn load(path: &Path) -> Result<Self, Error> {
-        Ok(Self {
-            tests: {
-                let s = fs::read_to_string(path)
-                    .map_err(|error| Error::Io { path: path.into(), error })?;
-                serde_json::from_str(&s)
-                    .map_err(|error| Error::CouldNotDeserialize { path: path.into(), error })?
-            },
-            skip: should_skip(path),
-        })
+        Ok(Self { tests: load_json(path)?, skip: should_skip(path) })
     }
 
     /// Runs the test cases for the Ethereum Forks test suite.

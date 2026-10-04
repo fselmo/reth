@@ -8,9 +8,11 @@ use clap::{Args, Parser, Subcommand};
 use ef_tests::{
     cases::blockchain_test::{BlockTestOptions, BlockchainTests},
     result::FixtureResult,
+    suite::find_all_files_with_extension,
     Suite,
 };
 
+mod engine_test;
 mod report;
 
 /// Command-line arguments for the test runner.
@@ -29,6 +31,16 @@ enum Command {
     /// Run blockchain tests by importing their blocks.
     #[command(name = "blocktest")]
     BlockTest(RunArgs),
+    /// Run blockchain tests in the engine format through reth's Engine API handler, each on a
+    /// datadir in the system temporary directory (`TMPDIR`; a tmpfs avoids disk syncs).
+    #[command(name = "enginetest")]
+    EngineTest {
+        #[command(flatten)]
+        args: RunArgs,
+        /// How many fixtures run at once.
+        #[arg(long, default_value_t = default_workers())]
+        workers: usize,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -40,6 +52,10 @@ struct RunArgs {
     /// `blocktest` this only changes the reported reason.
     #[arg(long = "engine.disable-bal-parallel-execution")]
     disable_bal_parallel_execution: bool,
+}
+
+fn default_workers() -> usize {
+    std::thread::available_parallelism().map_or(1, |n| n.get())
 }
 
 fn main() {
@@ -60,6 +76,17 @@ fn main() {
                 disable_bal_parallel_execution: args.disable_bal_parallel_execution,
             };
             suite.run_fixtures(options, &on_result);
+        }
+        Command::EngineTest { args, workers } => {
+            let path = fixtures_path(&args.path, "blockchain_tests_engine");
+            let mut files = find_all_files_with_extension(&path, ".json");
+            files.sort();
+            engine_test::run_fixtures(
+                files,
+                args.disable_bal_parallel_execution,
+                workers,
+                &on_result,
+            );
         }
     }
     let results = results.into_inner().unwrap();
