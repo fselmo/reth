@@ -11,13 +11,20 @@ use ef_tests::{
     suite::find_all_files_with_extension,
     Suite,
 };
+use reth_node_core::version::version_metadata;
 
 mod engine_test;
 mod report;
 
 /// Command-line arguments for the test runner.
 #[derive(Debug, Parser)]
-#[command(args_conflicts_with_subcommands = true, arg_required_else_help = true)]
+#[command(
+    name = "ef-test-runner",
+    version = version_metadata().short_version.as_ref(),
+    propagate_version = true,
+    args_conflicts_with_subcommands = true,
+    arg_required_else_help = true
+)]
 pub struct TestRunnerCommand {
     #[command(subcommand)]
     command: Option<Command>,
@@ -29,11 +36,11 @@ pub struct TestRunnerCommand {
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Run blockchain tests by importing their blocks.
-    #[command(name = "blocktest")]
+    #[command(name = "blocktest", display_name = "ef-test-runner")]
     BlockTest(RunArgs),
     /// Run blockchain tests in the engine format through reth's Engine API handler, each on a
     /// datadir in the system temporary directory (`TMPDIR`; a tmpfs avoids disk syncs).
-    #[command(name = "enginetest")]
+    #[command(name = "enginetest", display_name = "ef-test-runner")]
     EngineTest {
         #[command(flatten)]
         args: RunArgs,
