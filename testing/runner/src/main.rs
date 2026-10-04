@@ -36,11 +36,12 @@ pub struct TestRunnerCommand {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Run blockchain tests by importing their blocks.
+    /// Run blockchain tests by importing their blocks. Exits 1 if any fixture fails.
     #[command(name = "blocktest", display_name = "ef-test-runner")]
     BlockTest(RunArgs),
     /// Run blockchain tests in the engine format through reth's Engine API handler, each on a
-    /// datadir in the system temporary directory (`TMPDIR`; a tmpfs avoids disk syncs).
+    /// datadir in the system temporary directory (`TMPDIR`; a tmpfs avoids disk syncs). Exits 1
+    /// if any fixture fails.
     #[command(name = "enginetest", display_name = "ef-test-runner")]
     EngineTest {
         #[command(flatten)]
@@ -113,6 +114,9 @@ fn main() {
     }
     let results = results.into_inner().unwrap();
     println!("{}", serde_json::to_string(&results).expect("results serialize"));
+    if !results.iter().all(|result| result.pass) {
+        std::process::exit(1);
+    }
 }
 
 /// Returns an error if `path` does not exist or cannot be read.
