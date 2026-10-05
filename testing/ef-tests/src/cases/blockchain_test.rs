@@ -12,7 +12,7 @@ use alloy_eip7928::{
 };
 use alloy_primitives::B256;
 use alloy_rlp::Decodable;
-use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator};
+use rayon::iter::{IndexedParallelIterator, ParallelIterator};
 use reth_chainspec::ChainSpec;
 use reth_consensus::{Consensus, ConsensusError, HeaderValidator};
 use reth_db_common::init::{insert_genesis_hashes, insert_genesis_history, insert_genesis_state};
@@ -36,7 +36,7 @@ use reth_trie_db::DatabaseStateRoot;
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
 use tracing::debug;
 
@@ -57,46 +57,63 @@ impl BlockchainTests {
         Self { suite_path }
     }
 
-    /// Runs every fixture in the JSON `files` and passes one result per fixture to `on_result`
-    /// as it completes.
+    /// Runs every fixture in the JSON `files`, one file at a time on each of `workers` threads,
+    /// and passes one result per fixture to `on_result` as it completes.
     ///
     /// Unlike [`Suite::run`], this reports a file that fails to load as a failed result instead
     /// of panicking.
+    ///
+    /// The files are not run on the rayon pool: a rayon thread waiting on block execution's own
+    /// parallel work would start other files meanwhile, with no bound on how many are open.
     pub fn run_fixtures(
         files: Vec<PathBuf>,
         options: BlockTestOptions,
+        workers: usize,
         on_result: &(dyn Fn(FixtureResult) + Sync),
     ) {
-        files.into_par_iter().for_each(|path| {
-            let case = match BlockchainTestCase::load(&path) {
-                Ok(case) => case,
-                Err(err) => return on_result(FixtureResult::load_failed(&path, err)),
-            };
-            for (name, test) in case.tests {
-                if BlockchainTestCase::excluded_fork(test.network) {
-                    continue
-                }
-                let fork = format!("{:?}", test.network);
-                if case.skip {
-                    on_result(FixtureResult::new(name, fork, Err(Error::Skipped)));
-                    continue
-                }
-                let mut last_block_hash = test.genesis_block_header.hash;
-                let mut rejections = Vec::new();
-                let result = BlockchainTestCase::run_single_case_with(
-                    &name,
-                    &test,
-                    options,
-                    &mut last_block_hash,
-                    &mut rejections,
-                );
-                on_result(
-                    FixtureResult::new(name, fork, result)
-                        .with_last_block_hash(last_block_hash)
-                        .with_rejections(rejections),
-                );
+        let files = Mutex::new(files.into_iter());
+        std::thread::scope(|scope| {
+            for _ in 0..workers.max(1) {
+                scope.spawn(|| {
+                    while let Some(path) = files.lock().unwrap().next() {
+                        Self::run_file(&path, options, on_result);
+                    }
+                });
             }
         });
+    }
+
+    /// Runs every fixture in the JSON file at `path` and passes one result per fixture to
+    /// `on_result`.
+    fn run_file(path: &Path, options: BlockTestOptions, on_result: &dyn Fn(FixtureResult)) {
+        let case = match BlockchainTestCase::load(path) {
+            Ok(case) => case,
+            Err(err) => return on_result(FixtureResult::load_failed(path, err)),
+        };
+        for (name, test) in case.tests {
+            if BlockchainTestCase::excluded_fork(test.network) {
+                continue
+            }
+            let fork = format!("{:?}", test.network);
+            if case.skip {
+                on_result(FixtureResult::new(name, fork, Err(Error::Skipped)));
+                continue
+            }
+            let mut last_block_hash = test.genesis_block_header.hash;
+            let mut rejections = Vec::new();
+            let result = BlockchainTestCase::run_single_case_with(
+                &name,
+                &test,
+                options,
+                &mut last_block_hash,
+                &mut rejections,
+            );
+            on_result(
+                FixtureResult::new(name, fork, result)
+                    .with_last_block_hash(last_block_hash)
+                    .with_rejections(rejections),
+            );
+        }
     }
 }
 
