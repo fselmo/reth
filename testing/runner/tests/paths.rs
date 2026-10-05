@@ -72,3 +72,25 @@ fn no_arguments_print_usage() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("Usage: ef-test-runner"), "{stderr}");
 }
+
+/// Many paths run on `--workers` threads at a time, so the open files stay within a low limit.
+#[test]
+fn blocktest_runs_many_paths_within_the_open_file_limit() {
+    const PATHS: usize = 100;
+    let dir = tempfile::tempdir().unwrap();
+    for i in 0..PATHS {
+        fs::copy(fixture("blocktest_empty_block.json"), dir.path().join(format!("{i}.json")))
+            .unwrap();
+    }
+
+    let output = Command::new("sh")
+        .args(["-c", "ulimit -n 128 && exec \"$0\" \"$@\""])
+        .arg(env!("CARGO_BIN_EXE_ef-test-runner"))
+        .args(["blocktest", "--workers", "2"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let results: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(results.len(), PATHS);
+}

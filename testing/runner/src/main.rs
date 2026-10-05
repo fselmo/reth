@@ -43,13 +43,7 @@ enum Command {
     /// datadir in the system temporary directory (`TMPDIR`; a tmpfs avoids disk syncs). Exits 1
     /// if any fixture fails.
     #[command(name = "enginetest", display_name = "ef-test-runner")]
-    EngineTest {
-        #[command(flatten)]
-        args: RunArgs,
-        /// How many fixtures run at once.
-        #[arg(long, default_value_t = default_workers())]
-        workers: usize,
-    },
+    EngineTest(RunArgs),
 }
 
 #[derive(Debug, Args)]
@@ -66,6 +60,9 @@ struct RunArgs {
     /// ran it and, for the sequential one, why.
     #[arg(long)]
     bal_report: bool,
+    /// How many fixture files run at once.
+    #[arg(long, default_value_t = default_workers())]
+    workers: usize,
 }
 
 fn default_workers() -> usize {
@@ -81,7 +78,7 @@ fn main() {
     };
 
     let args = match &command {
-        Command::BlockTest(args) | Command::EngineTest { args, .. } => args,
+        Command::BlockTest(args) | Command::EngineTest(args) => args,
     };
     for path in &args.paths {
         if let Err(err) = check_readable(path) {
@@ -100,14 +97,14 @@ fn main() {
                 disable_bal_parallel_execution: args.disable_bal_parallel_execution,
             };
             let files = fixture_files(&args.paths, "blockchain_tests");
-            BlockchainTests::run_fixtures(files, options, &on_result);
+            BlockchainTests::run_fixtures(files, options, args.workers, &on_result);
         }
-        Command::EngineTest { args, workers } => {
+        Command::EngineTest(args) => {
             let files = fixture_files(&args.paths, "blockchain_tests_engine");
             engine_test::run_fixtures(
                 files,
                 args.disable_bal_parallel_execution,
-                workers,
+                args.workers,
                 &on_result,
             );
         }
