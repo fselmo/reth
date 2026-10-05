@@ -12,6 +12,7 @@ exclude.workspace = true
 clap = { workspace = true, features = ["derive"] }
 ef-tests.path = "../ef-tests"
 reth-chainspec.workspace = true
+reth-cli-util.workspace = true
 reth-db = { workspace = true, features = ["mdbx"] }
 reth-db-common.workspace = true
 reth-engine-primitives.workspace = true

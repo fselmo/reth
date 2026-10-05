@@ -3356,6 +3356,7 @@ dependencies = [
  "futures",
  "jsonrpsee",
  "reth-chainspec",
+ "reth-cli-util",
  "reth-db",
  "reth-db-common",
  "reth-engine-primitives",

@@ -70,6 +70,9 @@ fn default_workers() -> usize {
 }
 
 fn main() {
+    // Print a backtrace on a segmentation fault, as the node does, instead of dying silently.
+    reth_cli_util::sigsegv_handler::install();
+
     let cmd = TestRunnerCommand::parse();
     let Some(command) = cmd.command else {
         let suite_path = cmd.suite_path.expect("a suite path or a command is required");
