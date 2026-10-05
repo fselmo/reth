@@ -72,10 +72,13 @@ impl BlockchainTests {
         on_result: &(dyn Fn(FixtureResult) + Sync),
     ) {
         let files = Mutex::new(files.into_iter());
+        // A closure, so the queue's lock is released before the file runs: a guard taken in the
+        // `while let` condition would be held until the end of the loop body.
+        let next_file = || files.lock().unwrap().next();
         std::thread::scope(|scope| {
             for _ in 0..workers.max(1) {
                 scope.spawn(|| {
-                    while let Some(path) = files.lock().unwrap().next() {
+                    while let Some(path) = next_file() {
                         Self::run_file(&path, options, on_result);
                     }
                 });
