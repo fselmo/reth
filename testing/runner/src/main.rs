@@ -146,3 +146,55 @@ fn fixtures_path(path: &Path, format: &str) -> PathBuf {
         path.to_path_buf()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{sync::Condvar, time::Duration};
+
+    /// Runs two copies of the fixture file `file` with `run` on two workers, and checks that they
+    /// run at the same time: each result waits for the other one, which never comes while the
+    /// first worker blocks the file queue.
+    fn check_files_run_at_once(
+        file: &str,
+        run: impl FnOnce(Vec<PathBuf>, &(dyn Fn(FixtureResult) + Sync)),
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(file);
+        let files = (0..2)
+            .map(|i| {
+                let path = dir.path().join(format!("{i}.json"));
+                fs::copy(&fixture, &path).unwrap();
+                path
+            })
+            .collect();
+
+        let arrived = (Mutex::new(0), Condvar::new());
+        let timed_out = Mutex::new(Vec::new());
+        run(files, &|_| {
+            let (count, all_arrived) = &arrived;
+            let mut count = count.lock().unwrap();
+            *count += 1;
+            all_arrived.notify_all();
+            let (_count, wait) = all_arrived
+                .wait_timeout_while(count, Duration::from_secs(5), |count| *count < 2)
+                .unwrap();
+            timed_out.lock().unwrap().push(wait.timed_out());
+        });
+        assert_eq!(*timed_out.lock().unwrap(), [false, false]);
+    }
+
+    #[test]
+    fn blocktest_workers_run_files_at_the_same_time() {
+        check_files_run_at_once("blocktest_empty_block.json", |files, on_result| {
+            BlockchainTests::run_fixtures(files, BlockTestOptions::default(), 2, on_result)
+        });
+    }
+
+    #[test]
+    fn enginetest_workers_run_files_at_the_same_time() {
+        check_files_run_at_once("enginetest_empty_block.json", |files, on_result| {
+            engine_test::run_fixtures(files, false, 2, on_result)
+        });
+    }
+}
