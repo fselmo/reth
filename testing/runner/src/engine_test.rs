@@ -85,11 +85,14 @@ pub(crate) fn run_fixtures(
     let tree_config = tree_config(disable_bal_parallel_execution);
     let datadir_root = std::env::temp_dir();
     let files = Mutex::new(files.into_iter());
+    // A closure, so the queue's lock is released before the file runs: a guard taken in the
+    // `while let` condition would be held until the end of the loop body.
+    let next_file = || files.lock().unwrap().next();
     std::thread::scope(|scope| {
         for _ in 0..workers.max(1) {
             scope.spawn(|| {
                 let mut cleanup = Cleanup::default();
-                while let Some(path) = files.lock().unwrap().next() {
+                while let Some(path) = next_file() {
                     let tests = match load_json::<BTreeMap<String, EngineTest>>(&path) {
                         Ok(tests) => tests,
                         Err(err) => {
