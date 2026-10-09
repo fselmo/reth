@@ -55,6 +55,28 @@ pub const DEFAULT_SPARSE_TRIE_PRUNE_DEPTH: usize = 4;
 /// Default timeout for the state root task before spawning a sequential fallback.
 pub const DEFAULT_STATE_ROOT_TASK_TIMEOUT: Duration = Duration::from_secs(1);
 
+/// Default number of threads in the BAL read-set prewarm pool.
+///
+/// The work performed on those threads boils down mostly to MDBX reads. An MDBX read consists of
+/// a tree traversal and major page faults causing I/O.
+///
+/// In order to utilize the parallelism of `NVMe` we have to give it enough work, or equally,
+/// maintain a high queue depth. Modern `NVMe` devices require in between 64-128 requests in-flight
+/// to achieve its peak performance. Ideally we don't grow past that but it's OK to do so, it just
+/// means that a request is going to wait in the `NVMe` queue rather than in memory.
+///
+/// MDBX piggy-backs on the OS page cache for its buffers. Oftentimes, the hit rate reaches 90-99%
+/// hit rate. At that point, the workload can be classified as CPU-bound. In that case, having
+/// a high number of threads is counterproductive due to the effects of context switching, core
+/// migration, contention, etc.
+///
+/// However, that overhead is considered negligible compared to the benefits of fully utilizing
+/// `NVMe` resources. For example, with request latency of 100µs, 100k IO requests the expected
+/// time to finish is 312.5ms at QD=32 and 156.26ms at QD=64.
+///
+/// This should explain why this particular value is picked.
+pub const DEFAULT_BAL_PREWARM_THREADS: usize = 128;
+
 const DEFAULT_BLOCK_BUFFER_LIMIT: u32 = EPOCH_SLOTS as u32 * 2;
 const DEFAULT_MAX_INVALID_HEADER_CACHE_LENGTH: u32 = 256;
 const DEFAULT_MAX_EXECUTE_BLOCK_BATCH_SIZE: usize = 4;
@@ -228,6 +250,9 @@ pub struct TreeConfig {
     /// When set, BAL storage slots are not read into the execution cache. BAL hashed-state
     /// streaming for parallel state-root computation is controlled separately.
     disable_bal_batch_io: bool,
+    /// Number of threads in the BAL read-set prewarm pool, spawned on the first block executed
+    /// in parallel from its BAL.
+    bal_prewarm_threads: usize,
     /// Whether to skip trie state-root computation during engine validation.
     ///
     /// This trusts the block header's state root. It is intended for experiments that measure
@@ -285,6 +310,7 @@ impl Default for TreeConfig {
             disable_bal_parallel_execution: false,
             disable_bal_parallel_state_root: false,
             disable_bal_batch_io: false,
+            bal_prewarm_threads: DEFAULT_BAL_PREWARM_THREADS,
             skip_state_root: false,
             #[cfg(feature = "trie-debug")]
             proof_jitter: None,
@@ -371,6 +397,7 @@ impl TreeConfig {
             disable_bal_parallel_execution: false,
             disable_bal_parallel_state_root: false,
             disable_bal_batch_io: false,
+            bal_prewarm_threads: DEFAULT_BAL_PREWARM_THREADS,
             skip_state_root: false,
             #[cfg(feature = "trie-debug")]
             proof_jitter: None,
@@ -834,6 +861,17 @@ impl TreeConfig {
     /// Setter for whether to disable BAL state prefetching during prewarm.
     pub const fn without_bal_batch_io(mut self, disable_bal_batch_io: bool) -> Self {
         self.disable_bal_batch_io = disable_bal_batch_io;
+        self
+    }
+
+    /// Returns the number of threads in the BAL read-set prewarm pool.
+    pub const fn bal_prewarm_threads(&self) -> usize {
+        self.bal_prewarm_threads
+    }
+
+    /// Setter for the number of threads in the BAL read-set prewarm pool.
+    pub const fn with_bal_prewarm_threads(mut self, bal_prewarm_threads: usize) -> Self {
+        self.bal_prewarm_threads = bal_prewarm_threads;
         self
     }
 
