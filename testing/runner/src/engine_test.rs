@@ -56,6 +56,7 @@ use serde_json::{json, Value};
 use std::{
     collections::BTreeMap,
     fs,
+    num::NonZeroUsize,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::Duration,
@@ -75,14 +76,16 @@ const ENGINE_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 /// Runs every fixture in the JSON `files` on `workers` threads and passes one result per
 /// fixture to `on_result` as it completes. A file that fails to load is reported as a failed
 /// result. Each fixture's datadir is created in the system temporary directory (`TMPDIR`), where
-/// a tmpfs avoids disk syncs.
+/// a tmpfs avoids disk syncs. `bal_prewarm_threads` sizes each fixture's BAL read-set prewarm
+/// pool, the engine's default when `None`.
 pub(crate) fn run_fixtures(
     files: Vec<PathBuf>,
     disable_bal_parallel_execution: bool,
+    bal_prewarm_threads: Option<NonZeroUsize>,
     workers: usize,
     on_result: &(dyn Fn(FixtureResult) + Sync),
 ) {
-    let tree_config = tree_config(disable_bal_parallel_execution);
+    let tree_config = tree_config(disable_bal_parallel_execution, bal_prewarm_threads);
     let datadir_root = std::env::temp_dir();
     let files = Mutex::new(files.into_iter());
     // A closure, so the queue's lock is released before the file runs: a guard taken in the
@@ -115,7 +118,10 @@ pub(crate) fn run_fixtures(
 }
 
 /// Returns the engine tree configuration of the node with the runner's engine arguments.
-fn tree_config(disable_bal_parallel_execution: bool) -> TreeConfig {
+fn tree_config(
+    disable_bal_parallel_execution: bool,
+    bal_prewarm_threads: Option<NonZeroUsize>,
+) -> TreeConfig {
     let engine_args = EngineArgs {
         bal_parallel_execution_disabled: disable_bal_parallel_execution,
         // The default 4 GB cache would dominate the memory of concurrent workers.
@@ -125,7 +131,11 @@ fn tree_config(disable_bal_parallel_execution: bool) -> TreeConfig {
         ..Default::default()
     };
     engine_args.validate().expect("the runner's engine arguments are valid");
-    engine_args.tree_config()
+    let tree_config = engine_args.tree_config();
+    match bal_prewarm_threads {
+        Some(threads) => tree_config.with_bal_prewarm_threads(threads.get()),
+        None => tree_config,
+    }
 }
 
 /// What the engine ended with, reported beside the verdict.
@@ -582,6 +592,15 @@ mod tests {
     use alloy_rpc_types_engine::ExecutionPayloadV1;
     use ef_tests::models::{ForkSpec, Header, State};
 
+    #[test]
+    fn threads_caps_the_bal_prewarm_pool() {
+        assert_eq!(
+            tree_config(false, None).bal_prewarm_threads(),
+            reth_engine_primitives::DEFAULT_BAL_PREWARM_THREADS
+        );
+        assert_eq!(tree_config(false, NonZeroUsize::new(2)).bal_prewarm_threads(), 2);
+    }
+
     /// A Paris fixture whose one payload is an empty block on genesis with the given state root,
     /// and that payload's block hash.
     fn empty_block_fixture(state_root: Option<B256>) -> (EngineTest, B256) {
@@ -643,7 +662,7 @@ mod tests {
     fn run(test: &EngineTest) -> FixtureResult {
         let datadir_root = tempfile::tempdir().unwrap();
         let (result, remains) =
-            run_fixture("test".to_string(), test, &tree_config(false), datadir_root.path());
+            run_fixture("test".to_string(), test, &tree_config(false, None), datadir_root.path());
         let mut cleanup = Cleanup::default();
         cleanup.remains.push(remains);
         cleanup.finish();
