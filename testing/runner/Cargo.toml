@@ -39,6 +39,7 @@ reth-transaction-pool.workspace = true
 alloy-primitives.workspace = true
 alloy-rpc-types-engine.workspace = true
 futures.workspace = true
+rayon.workspace = true
 jsonrpsee = { workspace = true, features = ["server-core"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
