@@ -2,8 +2,8 @@
 
 use crate::{assert::assert_equal, Error};
 use alloy_consensus::Header as RethHeader;
-use alloy_eips::{eip4895::Withdrawals, eip7840::BlobParams};
-use alloy_genesis::GenesisAccount;
+use alloy_eips::{eip4895::Withdrawals, eip7840::BlobParams, eip7892::BlobScheduleBlobParams};
+use alloy_genesis::{Genesis, GenesisAccount};
 use alloy_primitives::{keccak256, map::HashMap, Address, Bloom, Bytes, B256, B64, U256};
 use reth_chainspec::{ChainSpec, ChainSpecBuilder, EthereumHardfork, ForkCondition};
 use reth_db_api::{cursor::DbDupCursorRO, tables, transaction::DbTx};
@@ -37,6 +37,62 @@ pub struct BlockchainTest {
     #[serde(default)]
     /// Engine spec.
     pub seal_engine: SealEngine,
+}
+
+/// A blockchain test in the engine format, whose blocks are Engine API payloads.
+#[derive(Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EngineTest {
+    /// Genesis block header.
+    pub genesis_block_header: Header,
+    /// The test pre-state.
+    pub pre: State,
+    /// Hash of the best block.
+    pub lastblockhash: B256,
+    /// Network spec.
+    pub network: ForkSpec,
+    /// The payloads to send, in order.
+    pub engine_new_payloads: Vec<EngineNewPayload>,
+}
+
+impl EngineTest {
+    /// Returns the chain spec of the test's network, with the test's genesis block.
+    pub fn chain_spec(&self) -> ChainSpec {
+        let header = &self.genesis_block_header;
+        let genesis = Genesis::default()
+            .with_nonce(u64::from_be_bytes(header.nonce.0))
+            .with_timestamp(header.timestamp.to())
+            .with_extra_data(header.extra_data.clone())
+            .with_gas_limit(header.gas_limit.to())
+            .with_difficulty(header.difficulty)
+            .with_mix_hash(header.mix_hash)
+            .with_coinbase(header.coinbase)
+            .with_base_fee(header.base_fee_per_gas.map(|fee| fee.to()))
+            .with_excess_blob_gas(header.excess_blob_gas.map(|gas| gas.to()))
+            .with_blob_gas_used(header.blob_gas_used.map(|gas| gas.to()))
+            .with_slot_number(header.slot_number.map(|slot| slot.to()))
+            .extend_accounts(self.pre.clone().into_genesis_state());
+        ChainSpec {
+            blob_params: self.network.blob_params(),
+            ..self.network.chain_spec_builder().genesis(genesis).build()
+        }
+    }
+}
+
+/// One `engine_newPayload` call of an [`EngineTest`].
+#[derive(Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EngineNewPayload {
+    /// The call's parameters, sent to the client as they are.
+    pub params: Vec<serde_json::Value>,
+    /// The version of `engine_newPayload` to call.
+    pub new_payload_version: String,
+    /// The version of `engine_forkchoiceUpdated` to call once the payload is accepted.
+    pub forkchoice_updated_version: String,
+    /// The expected validation error, if the payload is invalid.
+    pub validation_error: Option<String>,
+    /// The expected JSON-RPC error code, if the call must fail.
+    pub error_code: Option<String>,
 }
 
 /// A block header in an Ethereum blockchain test.
@@ -146,6 +202,29 @@ pub struct Block {
     pub transaction_sequence: Option<Vec<TransactionSequence>>,
     /// Withdrawals
     pub withdrawals: Option<Withdrawals>,
+    /// The block's access list (EIP-7928), delivered beside the block. Kept as JSON so that a
+    /// malformed list is dropped instead of failing the whole file.
+    pub block_access_list: Option<serde_json::Value>,
+    /// The decoded fields of a block that is expected to be invalid.
+    #[serde(rename = "rlp_decoded")]
+    pub rlp_decoded: Option<RlpDecodedBlock>,
+}
+
+impl Block {
+    /// Returns the access list delivered with this block, if any.
+    pub fn access_list(&self) -> Option<&serde_json::Value> {
+        self.block_access_list
+            .as_ref()
+            .or_else(|| self.rlp_decoded.as_ref()?.block_access_list.as_ref())
+    }
+}
+
+/// The decoded fields of a block that is expected to be invalid.
+#[derive(Debug, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RlpDecodedBlock {
+    /// The block's access list (EIP-7928).
+    pub block_access_list: Option<serde_json::Value>,
 }
 
 /// Transaction sequence in block
@@ -320,8 +399,20 @@ pub enum ForkSpec {
     CancunToPragueAtTime15k,
     /// Prague
     Prague,
+    /// Prague to Osaka at time 15k
+    PragueToOsakaAtTime15k,
     /// Osaka
     Osaka,
+    /// Osaka to BPO1 at time 15k
+    OsakaToBPO1AtTime15k,
+    /// BPO1 to BPO2 at time 15k
+    BPO1ToBPO2AtTime15k,
+    /// BPO2 to BPO3 at time 15k
+    BPO2ToBPO3AtTime15k,
+    /// BPO3 to BPO4 at time 15k
+    BPO3ToBPO4AtTime15k,
+    /// BPO2 to Amsterdam at time 15k
+    BPO2ToAmsterdamAtTime15k,
     /// Amsterdam
     Amsterdam,
 }
@@ -342,9 +433,47 @@ impl ForkSpec {
     }
 
     fn to_chain_spec_inner(self) -> ChainSpec {
+        ChainSpec { blob_params: self.blob_params(), ..self.chain_spec_builder().build() }
+    }
+
+    /// Returns the blob parameters of this fork spec, with those of its BPO forks scheduled at
+    /// their activation times.
+    ///
+    /// BPO3 and BPO4 are not scheduled on mainnet; their parameters are the ones the
+    /// execution-spec-tests fixtures use.
+    pub fn blob_params(self) -> BlobScheduleBlobParams {
+        let bpo3 = BlobParams {
+            target_blob_count: 21,
+            max_blob_count: 32,
+            update_fraction: 20_609_697,
+            ..BlobParams::osaka()
+        };
+        let bpo4 = BlobParams {
+            target_blob_count: 14,
+            max_blob_count: 21,
+            update_fraction: 13_739_630,
+            ..BlobParams::osaka()
+        };
+        let scheduled = match self {
+            Self::OsakaToBPO1AtTime15k => vec![(15_000, BlobParams::bpo1())],
+            Self::BPO1ToBPO2AtTime15k => {
+                vec![(0, BlobParams::bpo1()), (15_000, BlobParams::bpo2())]
+            }
+            Self::BPO2ToBPO3AtTime15k => vec![(0, BlobParams::bpo2()), (15_000, bpo3)],
+            Self::BPO3ToBPO4AtTime15k => vec![(0, bpo3), (15_000, bpo4)],
+            // Amsterdam follows BPO1 and BPO2, so its fixtures use BPO2's blob parameters.
+            Self::BPO2ToAmsterdamAtTime15k | Self::Amsterdam => vec![(0, BlobParams::bpo2())],
+            _ => Vec::new(),
+        };
+        BlobScheduleBlobParams::default().with_scheduled(scheduled)
+    }
+
+    /// Returns a builder of the chain spec with the hardforks of this fork spec, on the mainnet
+    /// genesis.
+    pub fn chain_spec_builder(self) -> ChainSpecBuilder {
         let spec_builder = ChainSpecBuilder::mainnet().reset();
 
-        let mut spec = match self {
+        match self {
             Self::Frontier => spec_builder.frontier_activated(),
             Self::FrontierToHomesteadAt5 => spec_builder
                 .frontier_activated()
@@ -391,16 +520,35 @@ impl ForkSpec {
                 .cancun_activated()
                 .with_fork(EthereumHardfork::Prague, ForkCondition::Timestamp(15_000)),
             Self::Prague => spec_builder.prague_activated(),
+            Self::PragueToOsakaAtTime15k => spec_builder
+                .prague_activated()
+                .with_fork(EthereumHardfork::Osaka, ForkCondition::Timestamp(15_000)),
             Self::Osaka => spec_builder.osaka_activated(),
+            Self::OsakaToBPO1AtTime15k => spec_builder
+                .osaka_activated()
+                .with_fork(EthereumHardfork::Bpo1, ForkCondition::Timestamp(15_000)),
+            Self::BPO1ToBPO2AtTime15k => spec_builder
+                .osaka_activated()
+                .with_fork(EthereumHardfork::Bpo1, ForkCondition::Timestamp(0))
+                .with_fork(EthereumHardfork::Bpo2, ForkCondition::Timestamp(15_000)),
+            Self::BPO2ToBPO3AtTime15k => spec_builder
+                .osaka_activated()
+                .with_fork(EthereumHardfork::Bpo1, ForkCondition::Timestamp(0))
+                .with_fork(EthereumHardfork::Bpo2, ForkCondition::Timestamp(0))
+                .with_fork(EthereumHardfork::Bpo3, ForkCondition::Timestamp(15_000)),
+            Self::BPO3ToBPO4AtTime15k => spec_builder
+                .osaka_activated()
+                .with_fork(EthereumHardfork::Bpo1, ForkCondition::Timestamp(0))
+                .with_fork(EthereumHardfork::Bpo2, ForkCondition::Timestamp(0))
+                .with_fork(EthereumHardfork::Bpo3, ForkCondition::Timestamp(0))
+                .with_fork(EthereumHardfork::Bpo4, ForkCondition::Timestamp(15_000)),
+            Self::BPO2ToAmsterdamAtTime15k => spec_builder
+                .osaka_activated()
+                .with_fork(EthereumHardfork::Bpo1, ForkCondition::Timestamp(0))
+                .with_fork(EthereumHardfork::Bpo2, ForkCondition::Timestamp(0))
+                .with_fork(EthereumHardfork::Amsterdam, ForkCondition::Timestamp(15_000)),
             Self::Amsterdam => spec_builder.amsterdam_activated(),
         }
-        .build();
-
-        // Amsterdam follows BPO1 and BPO2, so its fixtures use BPO2's blob parameters.
-        if self == Self::Amsterdam {
-            spec.blob_params = spec.blob_params.with_scheduled([(0, BlobParams::bpo2())]);
-        }
-        spec
     }
 }
 
@@ -487,6 +635,21 @@ mod tests {
         }"#;
         let res = serde_json::from_str::<Header>(test);
         assert!(res.is_ok(), "Failed to deserialize Header with error: {res:?}");
+    }
+
+    #[test]
+    fn block_access_list_deserialize() {
+        let valid = r#"{"rlp": "0xc0", "blockAccessList": [{"address": "0x01"}]}"#;
+        let block = serde_json::from_str::<Block>(valid).unwrap();
+        assert_eq!(block.access_list(), Some(&serde_json::json!([{"address": "0x01"}])));
+
+        let invalid = r#"{
+            "rlp": "0xc0",
+            "expectException": "BlockException.INVALID_BLOCK_ACCESS_LIST",
+            "rlp_decoded": {"blockAccessList": []}
+        }"#;
+        let block = serde_json::from_str::<Block>(invalid).unwrap();
+        assert_eq!(block.access_list(), Some(&serde_json::json!([])));
     }
 
     #[test]

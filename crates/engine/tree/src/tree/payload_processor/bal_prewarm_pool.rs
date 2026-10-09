@@ -69,6 +69,12 @@ impl BalPrewarmPool {
         Arc::new(Self { workers, next: AtomicUsize::new(0), _handles: handles })
     }
 
+    /// Returns the number of worker threads.
+    #[cfg(test)]
+    pub(crate) const fn num_threads(&self) -> usize {
+        self.workers.len()
+    }
+
     /// Begins a block: hands every worker the provider builder and shared cache so each opens its
     /// own read txn over the parent state. Pair with [`end_block`](Self::end_block).
     pub fn begin_block(
@@ -126,28 +132,6 @@ impl BalPrewarmPool {
         let _ = self.workers[i].send(PrewarmMsg::Warm(target));
     }
 }
-
-/// Number of warming threads.
-///
-/// The work performed on those threads boils down mostly to MDBX reads. An MDBX read consists of
-/// a tree traversal and major page faults causing I/O.
-///
-/// In order to utilize the parallelism of `NVMe` we have to give it enough work, or equally,
-/// maintain a high queue depth. Modern `NVMe` devices require in between 64-128 requests in-flight
-/// to achieve its peak performance. Ideally we don't grow past that but it's OK to do so, it just
-/// means that a request is going to wait in the `NVMe` queue rather than in memory.
-///
-/// MDBX piggy-backs on the OS page cache for its buffers. Oftentimes, the hit rate reaches 90-99%
-/// hit rate. At that point, the workload can be classified as CPU-bound. In that case, having
-/// a high number of threads is counterproductive due to the effects of context switching, core
-/// migration, contention, etc.
-///
-/// However, that overhead is considered negligible compared to the benefits of fully utilizing
-/// `NVMe` resources. For example, with request latency of 100µs, 100k IO requests the expected
-/// time to finish is 312.5ms at QD=32 and 156.26ms at QD=64.
-///
-/// This should explain why this particular value is picked.
-pub const DEFAULT_BAL_PREWARM_THREADS: usize = 128;
 
 /// Number of storage slots carried by one warm message.
 ///
