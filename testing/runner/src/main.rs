@@ -1,6 +1,7 @@
 //! Command-line interface for running tests.
 use std::{
     fs, io,
+    num::NonZeroUsize,
     path::{Path, PathBuf},
     sync::Mutex,
 };
@@ -63,6 +64,11 @@ struct RunArgs {
     /// How many fixture files run at once.
     #[arg(long, default_value_t = default_workers())]
     workers: usize,
+    /// Cap the thread pools whose size does not follow `--workers`: rayon's global pool, one
+    /// thread per core by default, and each `enginetest` fixture's BAL read-set prewarm pool,
+    /// 128 threads by default.
+    #[arg(long)]
+    threads: Option<NonZeroUsize>,
 }
 
 #[derive(Debug, Args)]
@@ -99,6 +105,12 @@ fn main() {
     if args.bal_report {
         report::init();
     }
+    if let Some(threads) = args.threads {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads.get())
+            .build_global()
+            .expect("rayon's global pool is built before any fixture runs");
+    }
     let results = Mutex::new(Vec::new());
     let on_result = |result: FixtureResult| results.lock().unwrap().push(result);
     match command {
@@ -109,7 +121,13 @@ fn main() {
         }
         Command::EngineTest(args) => {
             let files = fixture_files(&args.paths, "blockchain_tests_engine");
-            engine_test::run_fixtures(files, args.bal_sequential, args.workers, &on_result);
+            engine_test::run_fixtures(
+                files,
+                args.bal_sequential,
+                args.threads,
+                args.workers,
+                &on_result,
+            );
         }
     }
     // Every fixture ran, so nothing uses the shared RocksDB instance anymore.
@@ -199,7 +217,7 @@ mod tests {
     #[test]
     fn enginetest_workers_run_files_at_the_same_time() {
         check_files_run_at_once("enginetest_empty_block.json", |files, on_result| {
-            engine_test::run_fixtures(files, false, 2, on_result)
+            engine_test::run_fixtures(files, false, None, 2, on_result)
         });
     }
 }
