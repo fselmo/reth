@@ -3337,6 +3337,7 @@ dependencies = [
  "reth-primitives-traits",
  "reth-provider",
  "reth-revm",
+ "reth-tasks",
  "reth-tracing",
  "reth-trie",
  "reth-trie-db",
