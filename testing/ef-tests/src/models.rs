@@ -412,6 +412,10 @@ pub enum ForkSpec {
     BPO2ToAmsterdamAtTime15k,
     /// Amsterdam
     Amsterdam,
+    /// Amsterdam with frame transactions (EIP-8141) and the EIPs that ship with them
+    Bogota,
+    /// Amsterdam to Bogota at time 15k
+    AmsterdamToBogotaAtTime15k,
 }
 
 impl ForkSpec {
@@ -442,8 +446,8 @@ impl ForkSpec {
         let mut spec = builder.build();
 
         // Each BPO fork's blob parameters apply from its activation. Amsterdam follows BPO1 and
-        // BPO2, so its fixtures use BPO2's. BPO3 and BPO4 are not scheduled on mainnet; theirs
-        // are the ones the execution-spec-tests fixtures use.
+        // BPO2, so its fixtures, and Bogota's, use BPO2's. BPO3 and BPO4 are not scheduled on
+        // mainnet; theirs are the ones the execution-spec-tests fixtures use.
         let bpo3 = BlobParams {
             target_blob_count: 21,
             max_blob_count: 32,
@@ -463,7 +467,10 @@ impl ForkSpec {
             }
             Self::BPO2ToBPO3AtTime15k => vec![(0, BlobParams::bpo2()), (15_000, bpo3)],
             Self::BPO3ToBPO4AtTime15k => vec![(0, bpo3), (15_000, bpo4)],
-            Self::BPO2ToAmsterdamAtTime15k | Self::Amsterdam => vec![(0, BlobParams::bpo2())],
+            Self::BPO2ToAmsterdamAtTime15k |
+            Self::Amsterdam |
+            Self::Bogota |
+            Self::AmsterdamToBogotaAtTime15k => vec![(0, BlobParams::bpo2())],
             _ => return spec,
         };
         spec.blob_params = spec.blob_params.with_scheduled(scheduled);
@@ -550,6 +557,10 @@ impl ForkSpec {
                 .with_fork(EthereumHardfork::Bpo2, ForkCondition::Timestamp(0))
                 .with_fork(EthereumHardfork::Amsterdam, ForkCondition::Timestamp(15_000)),
             Self::Amsterdam => spec_builder.amsterdam_activated(),
+            Self::Bogota => spec_builder.bogota_activated(),
+            Self::AmsterdamToBogotaAtTime15k => spec_builder
+                .amsterdam_activated()
+                .with_fork(EthereumHardfork::Bogota, ForkCondition::Timestamp(15_000)),
         }
     }
 }
