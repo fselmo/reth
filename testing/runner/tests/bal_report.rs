@@ -9,7 +9,7 @@ use std::{
 };
 
 /// The switch that selects the sequential executor.
-const SEQUENTIAL: &str = "--engine.disable-bal-parallel-execution";
+const SEQUENTIAL: &str = "--bal-sequential";
 
 /// A fixture with one empty block on genesis: a Paris one without an access list, or an
 /// Amsterdam one (`*_amsterdam_*`) with one.

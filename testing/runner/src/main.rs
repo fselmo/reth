@@ -52,10 +52,10 @@ struct RunArgs {
     #[arg(required = true)]
     paths: Vec<PathBuf>,
     /// Run blocks on the sequential executor instead of the BAL-driven parallel one, as the
-    /// node flag of the same name does. Block import has only the sequential executor, so for
-    /// `blocktest` this only changes the reported reason.
-    #[arg(long = "engine.disable-bal-parallel-execution")]
-    disable_bal_parallel_execution: bool,
+    /// node's `--engine.disable-bal-parallel-execution` does. Block import has only the
+    /// sequential executor, so for `blocktest` this only changes the reported reason.
+    #[arg(long)]
+    bal_sequential: bool,
     /// Print a `balExecution` JSON line on stderr for each executed block, saying which executor
     /// ran it and, for the sequential one, why.
     #[arg(long)]
@@ -93,20 +93,13 @@ fn main() {
     let on_result = |result: FixtureResult| results.lock().unwrap().push(result);
     match command {
         Command::BlockTest(args) => {
-            let options = BlockTestOptions {
-                disable_bal_parallel_execution: args.disable_bal_parallel_execution,
-            };
+            let options = BlockTestOptions { bal_sequential: args.bal_sequential };
             let files = fixture_files(&args.paths, "blockchain_tests");
             BlockchainTests::run_fixtures(files, options, args.workers, &on_result);
         }
         Command::EngineTest(args) => {
             let files = fixture_files(&args.paths, "blockchain_tests_engine");
-            engine_test::run_fixtures(
-                files,
-                args.disable_bal_parallel_execution,
-                args.workers,
-                &on_result,
-            );
+            engine_test::run_fixtures(files, args.bal_sequential, args.workers, &on_result);
             engine_test::remove_shared_rocksdb();
         }
     }

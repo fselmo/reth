@@ -134,9 +134,10 @@ impl Suite for BlockchainTests {
 /// Options for running blockchain tests.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct BlockTestOptions {
-    /// The node's `--engine.disable-bal-parallel-execution`. Block import always runs the
-    /// sequential executor, so this only changes the reported reason.
-    pub disable_bal_parallel_execution: bool,
+    /// Whether blocks run on the sequential executor, as with the node's
+    /// `--engine.disable-bal-parallel-execution`. Block import always runs the sequential
+    /// executor, so this only changes the reported reason.
+    pub bal_sequential: bool,
 }
 
 /// An Ethereum blockchain test.
@@ -554,7 +555,7 @@ const fn execution_path_reason(
         "no-access-list"
     } else if !attached {
         "bad-access-list"
-    } else if options.disable_bal_parallel_execution {
+    } else if options.bal_sequential {
         "disabled"
     } else {
         "block-import"
@@ -769,7 +770,7 @@ mod tests {
 
     #[test]
     fn dropped_access_list_is_reported_before_the_switch() {
-        let disabled = BlockTestOptions { disable_bal_parallel_execution: true };
+        let disabled = BlockTestOptions { bal_sequential: true };
         let default = BlockTestOptions::default();
         assert_eq!(execution_path_reason(false, false, disabled), "no-access-list");
         assert_eq!(execution_path_reason(true, false, disabled), "bad-access-list");
