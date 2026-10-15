@@ -135,3 +135,24 @@ fn blocktest_drops_a_reordered_access_list() {
         assert_eq!(decisions(&args), decision("sequential", "bad-access-list"), "{mode:?}");
     }
 }
+
+/// With `--bal-withhold` a block executes without the list the fixture delivers, and its verdict
+/// still follows the header.
+#[test]
+fn blocktest_withholds_the_access_list() {
+    let amsterdam = fixture("blocktest_amsterdam_empty_block.json");
+    for mode in [&[][..], &[SEQUENTIAL]] {
+        let args = [
+            &["blocktest", amsterdam.to_str().unwrap(), "--bal-report", "--bal-withhold"][..],
+            mode,
+        ]
+        .concat();
+        assert_eq!(decisions(&args), decision("sequential", "withheld"), "{mode:?}");
+    }
+
+    let paris = fixture("blocktest_empty_block.json");
+    assert_eq!(
+        decisions(&["blocktest", paris.to_str().unwrap(), "--bal-report", "--bal-withhold"]),
+        decision("sequential", "no-access-list")
+    );
+}

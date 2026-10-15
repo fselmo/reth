@@ -38,7 +38,7 @@ pub struct TestRunnerCommand {
 enum Command {
     /// Run blockchain tests by importing their blocks. Exits 1 if any fixture fails.
     #[command(name = "blocktest", display_name = "ef-test-runner")]
-    BlockTest(RunArgs),
+    BlockTest(BlockTestArgs),
     /// Run blockchain tests in the engine format through reth's Engine API handler, each on a
     /// datadir in the system temporary directory (`TMPDIR`; a tmpfs avoids disk syncs). Exits 1
     /// if any fixture fails.
@@ -65,6 +65,16 @@ struct RunArgs {
     workers: usize,
 }
 
+#[derive(Debug, Args)]
+struct BlockTestArgs {
+    #[command(flatten)]
+    run: RunArgs,
+    /// Never deliver a block's access list, so every block executes without one, as a block
+    /// received without its list does.
+    #[arg(long)]
+    bal_withhold: bool,
+}
+
 fn default_workers() -> usize {
     std::thread::available_parallelism().map_or(1, |n| n.get())
 }
@@ -78,7 +88,7 @@ fn main() {
     };
 
     let args = match &command {
-        Command::BlockTest(args) | Command::EngineTest(args) => args,
+        Command::BlockTest(BlockTestArgs { run, .. }) | Command::EngineTest(run) => run,
     };
     for path in &args.paths {
         if let Err(err) = check_readable(path) {
@@ -92,8 +102,8 @@ fn main() {
     let results = Mutex::new(Vec::new());
     let on_result = |result: FixtureResult| results.lock().unwrap().push(result);
     match command {
-        Command::BlockTest(args) => {
-            let options = BlockTestOptions { bal_sequential: args.bal_sequential };
+        Command::BlockTest(BlockTestArgs { run: args, bal_withhold }) => {
+            let options = BlockTestOptions { bal_sequential: args.bal_sequential, bal_withhold };
             let files = fixture_files(&args.paths, "blockchain_tests");
             BlockchainTests::run_fixtures(files, options, args.workers, &on_result);
         }

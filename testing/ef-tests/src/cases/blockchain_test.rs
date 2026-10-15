@@ -138,6 +138,9 @@ pub struct BlockTestOptions {
     /// `--engine.disable-bal-parallel-execution`. Block import always runs the sequential
     /// executor, so this only changes the reported reason.
     pub bal_sequential: bool,
+    /// Whether blocks execute without the access list the fixture delivers, as a block received
+    /// without its list does.
+    pub bal_withhold: bool,
 }
 
 /// An Ethereum blockchain test.
@@ -371,6 +374,7 @@ fn run_case(
             .access_list()
             .filter(|_| block.block_access_list_hash.is_some());
         let access_list = delivered
+            .filter(|_| !options.bal_withhold)
             .map(|access_list| check_delivered_access_list(block, access_list))
             .transpose()
             .map_err(|err| Error::block_failed(block_number, err))?
@@ -545,7 +549,8 @@ fn report_execution_path(
 }
 
 /// The engine's gates in its order, the access list before the switch. A delivered list that was
-/// dropped is reported as `bad-access-list`, which therefore also comes before `disabled`.
+/// withheld or dropped is reported as `withheld` or `bad-access-list`, which therefore also come
+/// before `disabled`.
 const fn execution_path_reason(
     delivered: bool,
     attached: bool,
@@ -553,6 +558,8 @@ const fn execution_path_reason(
 ) -> &'static str {
     if !delivered {
         "no-access-list"
+    } else if options.bal_withhold {
+        "withheld"
     } else if !attached {
         "bad-access-list"
     } else if options.bal_sequential {
@@ -769,10 +776,15 @@ mod tests {
     }
 
     #[test]
-    fn dropped_access_list_is_reported_before_the_switch() {
-        let disabled = BlockTestOptions { bal_sequential: true };
+    fn dropped_or_withheld_access_list_is_reported_before_the_switch() {
+        let disabled = BlockTestOptions { bal_sequential: true, ..Default::default() };
+        let withheld = BlockTestOptions { bal_withhold: true, ..Default::default() };
+        let withheld_disabled = BlockTestOptions { bal_sequential: true, bal_withhold: true };
         let default = BlockTestOptions::default();
         assert_eq!(execution_path_reason(false, false, disabled), "no-access-list");
+        assert_eq!(execution_path_reason(false, false, withheld), "no-access-list");
+        assert_eq!(execution_path_reason(true, false, withheld), "withheld");
+        assert_eq!(execution_path_reason(true, false, withheld_disabled), "withheld");
         assert_eq!(execution_path_reason(true, false, disabled), "bad-access-list");
         assert_eq!(execution_path_reason(true, false, default), "bad-access-list");
         assert_eq!(execution_path_reason(true, true, disabled), "disabled");
