@@ -107,6 +107,7 @@ fn main() {
                 args.workers,
                 &on_result,
             );
+            engine_test::remove_shared_rocksdb();
         }
     }
     let results = results.into_inner().unwrap();
