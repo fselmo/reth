@@ -3318,6 +3318,7 @@ dependencies = [
  "ef-tests",
  "futures",
  "jsonrpsee",
+ "rayon",
  "reth-chainspec",
  "reth-db",
  "reth-db-common",
