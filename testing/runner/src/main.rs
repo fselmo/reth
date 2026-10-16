@@ -12,7 +12,8 @@ use ef_tests::{
     suite::find_all_files_with_extension,
     Suite,
 };
-use reth_node_core::version::version_metadata;
+use reth_node_core::{args::StorageArgs, version::version_metadata};
+use reth_provider::StorageSettings;
 
 mod engine_test;
 mod report;
@@ -43,7 +44,7 @@ enum Command {
     /// datadir in the system temporary directory (`TMPDIR`; a tmpfs avoids disk syncs). Exits 1
     /// if any fixture fails.
     #[command(name = "enginetest", display_name = "ef-test-runner")]
-    EngineTest(RunArgs),
+    EngineTest(EngineTestArgs),
 }
 
 #[derive(Debug, Args)]
@@ -75,6 +76,23 @@ struct BlockTestArgs {
     bal_withhold: bool,
 }
 
+#[derive(Debug, Args)]
+struct EngineTestArgs {
+    #[command(flatten)]
+    run: RunArgs,
+    #[command(flatten)]
+    storage: StorageArgs,
+}
+
+/// Returns the storage settings a node writes with the genesis of a new database.
+const fn storage_settings(storage: StorageArgs) -> StorageSettings {
+    if storage.v2 {
+        StorageSettings::v2()
+    } else {
+        StorageSettings::v1()
+    }
+}
+
 fn default_workers() -> usize {
     std::thread::available_parallelism().map_or(1, |n| n.get())
 }
@@ -88,7 +106,8 @@ fn main() {
     };
 
     let args = match &command {
-        Command::BlockTest(BlockTestArgs { run, .. }) | Command::EngineTest(run) => run,
+        Command::BlockTest(BlockTestArgs { run, .. }) |
+        Command::EngineTest(EngineTestArgs { run, .. }) => run,
     };
     for path in &args.paths {
         if let Err(err) = check_readable(path) {
@@ -109,9 +128,15 @@ fn main() {
             // Every fixture ran, so nothing uses the shared RocksDB instance anymore.
             remove_shared_rocksdb();
         }
-        Command::EngineTest(args) => {
+        Command::EngineTest(EngineTestArgs { run: args, storage }) => {
             let files = fixture_files(&args.paths, "blockchain_tests_engine");
-            engine_test::run_fixtures(files, args.bal_sequential, args.workers, &on_result);
+            engine_test::run_fixtures(
+                files,
+                args.bal_sequential,
+                storage_settings(storage),
+                args.workers,
+                &on_result,
+            );
         }
     }
     let results = results.into_inner().unwrap();
@@ -199,7 +224,21 @@ mod tests {
     #[test]
     fn enginetest_workers_run_files_at_the_same_time() {
         check_files_run_at_once("enginetest_empty_block.json", |files, on_result| {
-            engine_test::run_fixtures(files, false, 2, on_result)
+            engine_test::run_fixtures(files, false, StorageSettings::base(), 2, on_result)
         });
+    }
+
+    #[test]
+    fn enginetest_takes_the_node_storage_layout_flag() {
+        let settings = |args: &[&str]| {
+            let cmd = TestRunnerCommand::parse_from(
+                ["ef-test-runner", "enginetest", "fixtures"].iter().chain(args),
+            );
+            let Some(Command::EngineTest(args)) = cmd.command else { panic!("{cmd:?}") };
+            storage_settings(args.storage)
+        };
+        assert_eq!(settings(&[]), StorageSettings::v2());
+        assert_eq!(settings(&["--storage.v2"]), StorageSettings::v2());
+        assert_eq!(settings(&["--storage.v2=false"]), StorageSettings::v1());
     }
 }
