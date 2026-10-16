@@ -7,7 +7,7 @@ use std::{
 
 use clap::{Args, Parser, Subcommand};
 use ef_tests::{
-    cases::blockchain_test::{BlockTestOptions, BlockchainTests},
+    cases::blockchain_test::{remove_shared_rocksdb, BlockTestOptions, BlockchainTests},
     result::FixtureResult,
     suite::find_all_files_with_extension,
     Suite,
@@ -110,9 +110,10 @@ fn main() {
         Command::EngineTest(args) => {
             let files = fixture_files(&args.paths, "blockchain_tests_engine");
             engine_test::run_fixtures(files, args.bal_sequential, args.workers, &on_result);
-            engine_test::remove_shared_rocksdb();
         }
     }
+    // Every fixture ran, so nothing uses the shared RocksDB instance anymore.
+    remove_shared_rocksdb();
     let results = results.into_inner().unwrap();
     println!("{}", serde_json::to_string(&results).expect("results serialize"));
     if !results.iter().all(|result| result.pass) {

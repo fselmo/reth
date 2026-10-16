@@ -11,6 +11,7 @@ use alloy_primitives::B256;
 use alloy_rpc_types_engine::{ClientCode, ClientVersionV1};
 use ef_tests::{
     case::load_json,
+    cases::blockchain_test::shared_rocksdb,
     models::{EngineNewPayload, EngineTest},
     result::{FixtureResult, Rejection},
     Error,
@@ -41,7 +42,7 @@ use reth_node_ethereum::{EthEngineTypes, EthereumEngineValidator, EthereumNode};
 use reth_node_types::NodeTypesWithDBAdapter;
 use reth_payload_builder::{PayloadBuilderHandle, PayloadStore};
 use reth_provider::{
-    providers::{BlockchainProvider, RocksDBBuilder, RocksDBProvider, StaticFileProvider},
+    providers::{BlockchainProvider, StaticFileProvider},
     BlockNumReader, ProviderFactory, StorageSettings, StorageSettingsCache,
 };
 use reth_prune::{PruneModes, PrunerBuilder};
@@ -57,7 +58,7 @@ use std::{
     collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, OnceLock},
+    sync::{Arc, Mutex},
     time::Duration,
 };
 use tokio_stream::wrappers::UnboundedReceiverStream;
@@ -71,39 +72,6 @@ const PERSISTENCE_THRESHOLD: u64 = 1_000_000;
 
 /// How long a fixture's engine tree gets to persist its blocks and stop.
 const ENGINE_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// The `RocksDB` instance shared by every fixture of the process, and its directory.
-///
-/// Opening and closing `RocksDB` dominates a fixture's runtime, and the fixtures never use it:
-/// their genesis is written with v1 storage settings, which keep everything in MDBX and static
-/// files. It is never closed, so no close can run while the process exits.
-static SHARED_ROCKSDB: OnceLock<(PathBuf, RocksDBProvider)> = OnceLock::new();
-
-/// Returns the shared `RocksDB` instance, created in the system temporary directory on first use.
-fn shared_rocksdb() -> RocksDBProvider {
-    let (_, rocksdb) = SHARED_ROCKSDB.get_or_init(|| {
-        let dir = tempfile::Builder::new()
-            .prefix("reth-enginetest-rocksdb-")
-            .tempdir()
-            .expect("failed to create the shared RocksDB directory")
-            .keep();
-        let rocksdb = RocksDBBuilder::new(&dir)
-            .with_default_tables()
-            .build()
-            .expect("failed to create the shared RocksDB provider");
-        (dir, rocksdb)
-    });
-    rocksdb.clone()
-}
-
-/// Removes the shared `RocksDB` instance's directory, once no fixture runs anymore.
-pub(crate) fn remove_shared_rocksdb() {
-    if let Some((dir, _)) = SHARED_ROCKSDB.get() &&
-        let Err(err) = fs::remove_dir_all(dir)
-    {
-        eprintln!("failed to remove {}: {err}", dir.display());
-    }
-}
 
 /// Runs every fixture in the JSON `files` on `workers` threads and passes one result per
 /// fixture to `on_result` as it completes. A file that fails to load is reported as a failed

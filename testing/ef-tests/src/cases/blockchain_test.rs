@@ -39,7 +39,7 @@ use std::{
     collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
-    sync::{Arc, LazyLock, Mutex},
+    sync::{Arc, Mutex, OnceLock},
 };
 use tracing::debug;
 
@@ -662,15 +662,34 @@ fn path_contains(path_str: &str, rhs: &[&str]) -> bool {
 /// Opening `RocksDB` is expensive and ef-tests never use it: the storage settings stay at v1, so
 /// everything is stored in MDBX and static files. A fresh instance per case dominates the runtime.
 ///
-/// The backing directory is created with [`reth_db::test_utils::tempdir_path`], which leaks it:
-/// statics are never dropped, so there is no point at which a temp dir guard could clean
-/// up. This costs one small, mostly empty directory in the system temp dir per test process.
-static SHARED_ROCKSDB: LazyLock<RocksDBProvider> = LazyLock::new(|| {
-    RocksDBBuilder::new(reth_db::test_utils::tempdir_path().join("rocksdb"))
-        .with_default_tables()
-        .build()
-        .expect("failed to create shared test RocksDB provider")
-});
+/// The backing directory is created with [`reth_db::test_utils::tempdir_path`]. Statics are never
+/// dropped, so the instance is never closed and no close can run while the process exits. A test
+/// process leaves its small, mostly empty directory in the system temp dir; `ef-test-runner`
+/// removes it with [`remove_shared_rocksdb`] once every fixture ran.
+static SHARED_ROCKSDB: OnceLock<(PathBuf, RocksDBProvider)> = OnceLock::new();
+
+/// Returns the [`SHARED_ROCKSDB`] instance, created on first use.
+pub fn shared_rocksdb() -> RocksDBProvider {
+    let (_, rocksdb) = SHARED_ROCKSDB.get_or_init(|| {
+        let path = reth_db::test_utils::tempdir_path();
+        let rocksdb = RocksDBBuilder::new(path.join("rocksdb"))
+            .with_default_tables()
+            .build()
+            .expect("failed to create shared test RocksDB provider");
+        (path, rocksdb)
+    });
+    rocksdb.clone()
+}
+
+/// Removes the directory of the [`SHARED_ROCKSDB`] instance, if one was created. Call it only once
+/// no case runs anymore.
+pub fn remove_shared_rocksdb() {
+    if let Some((path, _)) = SHARED_ROCKSDB.get() &&
+        let Err(err) = fs::remove_dir_all(path)
+    {
+        eprintln!("failed to remove {}: {err}", path.display());
+    }
+}
 
 /// Creates a provider factory for a single test case.
 ///
@@ -697,7 +716,7 @@ fn create_test_provider_factory(
             .with_genesis_block_number(genesis_block_number)
             .build()
             .expect("static file provider"),
-        SHARED_ROCKSDB.clone(),
+        shared_rocksdb(),
         Runtime::test(),
     )
     .expect("failed to create test provider factory");
