@@ -230,6 +230,9 @@ pub struct TreeConfig {
     disable_bal_batch_io: bool,
     /// Whether block execution reuses transaction prewarming results.
     prewarm_reuse: bool,
+    /// Number of threads in the BAL read-set prewarm pool, spawned on the first block executed
+    /// in parallel from its BAL. `None` keeps the pool's default.
+    bal_prewarm_threads: Option<usize>,
     /// Whether to skip trie state-root computation during engine validation.
     ///
     /// This trusts the block header's state root. It is intended for experiments that measure
@@ -288,6 +291,7 @@ impl Default for TreeConfig {
             disable_bal_parallel_state_root: false,
             disable_bal_batch_io: false,
             prewarm_reuse: false,
+            bal_prewarm_threads: None,
             skip_state_root: false,
             #[cfg(feature = "trie-debug")]
             proof_jitter: None,
@@ -380,6 +384,7 @@ impl TreeConfig {
             disable_bal_parallel_state_root: false,
             disable_bal_batch_io: false,
             prewarm_reuse: false,
+            bal_prewarm_threads: None,
             skip_state_root: false,
             #[cfg(feature = "trie-debug")]
             proof_jitter: None,
@@ -859,6 +864,17 @@ impl TreeConfig {
     /// Setter for whether block execution reuses transaction prewarming results.
     pub const fn with_prewarm_reuse(mut self, prewarm_reuse: bool) -> Self {
         self.prewarm_reuse = prewarm_reuse;
+        self
+    }
+
+    /// Returns the number of threads in the BAL read-set prewarm pool, if set.
+    pub const fn bal_prewarm_threads(&self) -> Option<usize> {
+        self.bal_prewarm_threads
+    }
+
+    /// Setter for the number of threads in the BAL read-set prewarm pool.
+    pub const fn with_bal_prewarm_threads(mut self, bal_prewarm_threads: usize) -> Self {
+        self.bal_prewarm_threads = Some(bal_prewarm_threads);
         self
     }
 

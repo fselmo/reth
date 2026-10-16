@@ -70,6 +70,12 @@ impl BalPrewarmPool {
         Arc::new(Self { workers, next: AtomicUsize::new(0), handles })
     }
 
+    /// Returns the number of worker threads.
+    #[cfg(test)]
+    pub(crate) const fn num_threads(&self) -> usize {
+        self.workers.len()
+    }
+
     /// Begins a block: hands every worker the provider builder and shared cache so each opens its
     /// own read txn over the parent state. Pair with [`end_block`](Self::end_block).
     pub fn begin_block(

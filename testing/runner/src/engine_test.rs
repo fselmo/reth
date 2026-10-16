@@ -56,6 +56,7 @@ use serde_json::{json, Value};
 use std::{
     collections::BTreeMap,
     fs,
+    num::NonZeroUsize,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::Duration,
@@ -76,14 +77,17 @@ const ENGINE_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 /// fixture to `on_result` as it completes. A file that fails to load is reported as a failed
 /// result. Each fixture's datadir is created in the system temporary directory (`TMPDIR`), where
 /// a tmpfs avoids disk syncs, and its genesis is written with `storage_settings`.
+/// `bal_prewarm_threads` sizes each fixture's BAL read-set prewarm pool, the engine's default
+/// when `None`.
 pub(crate) fn run_fixtures(
     files: Vec<PathBuf>,
     bal_sequential: bool,
     storage_settings: StorageSettings,
+    bal_prewarm_threads: Option<NonZeroUsize>,
     workers: usize,
     on_result: &(dyn Fn(FixtureResult) + Sync),
 ) {
-    let tree_config = tree_config(bal_sequential);
+    let tree_config = tree_config(bal_sequential, bal_prewarm_threads);
     let datadir_root = std::env::temp_dir();
     let files = Mutex::new(files.into_iter());
     // A closure, so the queue's lock is released before the file runs: a guard taken in the
@@ -116,7 +120,7 @@ pub(crate) fn run_fixtures(
 }
 
 /// Returns the engine tree configuration of the node with the runner's engine arguments.
-fn tree_config(bal_sequential: bool) -> TreeConfig {
+fn tree_config(bal_sequential: bool, bal_prewarm_threads: Option<NonZeroUsize>) -> TreeConfig {
     let engine_args = EngineArgs {
         bal_parallel_execution_disabled: bal_sequential,
         // The default 4 GB cache would dominate the memory of concurrent workers.
@@ -126,7 +130,11 @@ fn tree_config(bal_sequential: bool) -> TreeConfig {
         ..Default::default()
     };
     engine_args.validate().expect("the runner's engine arguments are valid");
-    engine_args.tree_config()
+    let tree_config = engine_args.tree_config();
+    match bal_prewarm_threads {
+        Some(threads) => tree_config.with_bal_prewarm_threads(threads.get()),
+        None => tree_config,
+    }
 }
 
 /// What the engine ended with, reported beside the verdict.
@@ -587,6 +595,12 @@ mod tests {
     use ef_tests::models::{ForkSpec, Header, State};
     use reth_provider::{DatabaseProviderFactory, StorageSettingsCache};
 
+    #[test]
+    fn threads_caps_the_bal_prewarm_pool() {
+        assert_eq!(tree_config(false, None).bal_prewarm_threads(), None);
+        assert_eq!(tree_config(false, NonZeroUsize::new(2)).bal_prewarm_threads(), Some(2));
+    }
+
     /// A Paris fixture whose one payload is an empty block on genesis with the given state root,
     /// and that payload's block hash.
     fn empty_block_fixture(state_root: Option<B256>) -> (EngineTest, B256) {
@@ -650,7 +664,7 @@ mod tests {
         let (result, remains) = run_fixture(
             "test".to_string(),
             test,
-            &tree_config(false),
+            &tree_config(false, None),
             StorageSettings::base(),
             datadir_root.path(),
         );
@@ -673,7 +687,7 @@ mod tests {
                 let engine = Engine::start(
                     Arc::new(test.chain_spec()),
                     &datadir,
-                    &tree_config(false),
+                    &tree_config(false, None),
                     storage_settings,
                     &runtime,
                 )
