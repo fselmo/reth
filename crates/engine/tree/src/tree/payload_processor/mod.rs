@@ -114,6 +114,8 @@ where
     disable_bal_batch_io: bool,
     /// Whether block execution may reuse transaction prewarming results.
     reuse_prewarm_results: bool,
+    /// Number of threads in the BAL read-set prewarm pool, if not the pool's default.
+    bal_prewarm_threads: Option<usize>,
     /// Dedicated blocking pool for warming the BAL read-set, created lazily on the first BAL block
     /// (see [`Self::bal_prewarm_pool`]). Its threads exit when the processor is dropped.
     bal_prewarm_pool: OnceLock<Arc<bal_prewarm_pool::BalPrewarmPool>>,
@@ -146,6 +148,7 @@ where
             disable_bal_parallel_state_root: config.disable_bal_parallel_state_root(),
             disable_bal_batch_io: config.disable_bal_batch_io(),
             reuse_prewarm_results: config.prewarm_reuse(),
+            bal_prewarm_threads: config.bal_prewarm_threads(),
             bal_prewarm_pool: OnceLock::new(),
         }
     }
@@ -155,7 +158,10 @@ where
     fn bal_prewarm_pool(&self) -> Arc<bal_prewarm_pool::BalPrewarmPool> {
         self.bal_prewarm_pool
             .get_or_init(|| {
-                bal_prewarm_pool::BalPrewarmPool::new(bal_prewarm_pool::DEFAULT_BAL_PREWARM_THREADS)
+                bal_prewarm_pool::BalPrewarmPool::new(
+                    self.bal_prewarm_threads
+                        .unwrap_or(bal_prewarm_pool::DEFAULT_BAL_PREWARM_THREADS),
+                )
             })
             .clone()
     }
@@ -785,6 +791,21 @@ mod tests {
             &TreeConfig::default(),
             PrecompileCacheMap::default(),
         )
+    }
+
+    #[test]
+    fn bal_prewarm_pool_has_the_configured_threads() {
+        let processor = PayloadProcessor::new(
+            reth_tasks::Runtime::test(),
+            EthEvmConfig::new(Arc::new(ChainSpec::default())),
+            &TreeConfig::default().with_bal_prewarm_threads(3),
+            PrecompileCacheMap::default(),
+        );
+        assert_eq!(processor.bal_prewarm_pool().num_threads(), 3);
+        assert_eq!(
+            test_processor().bal_prewarm_pool().num_threads(),
+            super::bal_prewarm_pool::DEFAULT_BAL_PREWARM_THREADS
+        );
     }
 
     #[test]
