@@ -2,8 +2,10 @@
 
 use crate::result::{CaseResult, Error};
 use rayon::prelude::*;
+use serde::de::DeserializeOwned;
 use std::{
     fmt::Debug,
+    fs,
     path::{Path, PathBuf},
 };
 
@@ -40,4 +42,12 @@ impl<T: Case> Cases<T> {
             .map(|(path, case)| CaseResult::new(&path, case.description(), case.run()))
             .collect()
     }
+}
+
+/// Reads the JSON test file at `path`.
+pub fn load_json<T: DeserializeOwned>(path: &Path) -> Result<T, Error> {
+    let contents =
+        fs::read_to_string(path).map_err(|error| Error::Io { path: path.into(), error })?;
+    serde_json::from_str(&contents)
+        .map_err(|error| Error::CouldNotDeserialize { path: path.into(), error })
 }
