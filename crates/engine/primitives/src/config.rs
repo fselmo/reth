@@ -228,6 +228,9 @@ pub struct TreeConfig {
     /// When set, BAL storage slots are not read into the execution cache. BAL hashed-state
     /// streaming for parallel state-root computation is controlled separately.
     disable_bal_batch_io: bool,
+    /// Number of threads in the BAL read-set prewarm pool, spawned on the first block executed
+    /// in parallel from its BAL. `None` keeps the pool's default.
+    bal_prewarm_threads: Option<usize>,
     /// Whether to skip trie state-root computation during engine validation.
     ///
     /// This trusts the block header's state root. It is intended for experiments that measure
@@ -285,6 +288,7 @@ impl Default for TreeConfig {
             disable_bal_parallel_execution: false,
             disable_bal_parallel_state_root: false,
             disable_bal_batch_io: false,
+            bal_prewarm_threads: None,
             skip_state_root: false,
             #[cfg(feature = "trie-debug")]
             proof_jitter: None,
@@ -371,6 +375,7 @@ impl TreeConfig {
             disable_bal_parallel_execution: false,
             disable_bal_parallel_state_root: false,
             disable_bal_batch_io: false,
+            bal_prewarm_threads: None,
             skip_state_root: false,
             #[cfg(feature = "trie-debug")]
             proof_jitter: None,
@@ -834,6 +839,17 @@ impl TreeConfig {
     /// Setter for whether to disable BAL state prefetching during prewarm.
     pub const fn without_bal_batch_io(mut self, disable_bal_batch_io: bool) -> Self {
         self.disable_bal_batch_io = disable_bal_batch_io;
+        self
+    }
+
+    /// Returns the number of threads in the BAL read-set prewarm pool, if set.
+    pub const fn bal_prewarm_threads(&self) -> Option<usize> {
+        self.bal_prewarm_threads
+    }
+
+    /// Setter for the number of threads in the BAL read-set prewarm pool.
+    pub const fn with_bal_prewarm_threads(mut self, bal_prewarm_threads: usize) -> Self {
+        self.bal_prewarm_threads = Some(bal_prewarm_threads);
         self
     }
 
