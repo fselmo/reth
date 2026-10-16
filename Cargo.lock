@@ -3346,6 +3346,8 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-stream",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -3379,6 +3381,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.21",
+ "tracing",
  "walkdir",
 ]
 
