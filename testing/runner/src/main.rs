@@ -107,14 +107,14 @@ fn main() {
             let options = BlockTestOptions { bal_sequential: args.bal_sequential, bal_withhold };
             let files = fixture_files(&args.paths, "blockchain_tests");
             BlockchainTests::run_fixtures(files, options, args.workers, &on_result);
+            // Every fixture ran, so nothing uses the shared RocksDB instance anymore.
+            remove_shared_rocksdb();
         }
         Command::EngineTest(args) => {
             let files = fixture_files(&args.paths, "blockchain_tests_engine");
             engine_test::run_fixtures(files, args.bal_sequential, args.workers, &on_result);
         }
     }
-    // Every fixture ran, so nothing uses the shared RocksDB instance anymore.
-    remove_shared_rocksdb();
     let results = results.into_inner().unwrap();
     println!("{}", serde_json::to_string(&results).expect("results serialize"));
     // A file that could not be loaded means the run did not cover all of its input.

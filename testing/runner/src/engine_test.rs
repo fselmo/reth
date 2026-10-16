@@ -11,7 +11,6 @@ use alloy_primitives::B256;
 use alloy_rpc_types_engine::{ClientCode, ClientVersionV1};
 use ef_tests::{
     case::load_json,
-    cases::blockchain_test::shared_rocksdb,
     models::{EngineNewPayload, EngineTest},
     result::{FixtureResult, Rejection},
     Error,
@@ -24,7 +23,7 @@ use reth_db::{
     mdbx::{DatabaseArguments, SyncMode},
     DatabaseEnv,
 };
-use reth_db_common::init::init_genesis_with_settings;
+use reth_db_common::init::init_genesis;
 use reth_engine_primitives::{ConsensusEngineHandle, NoopInvalidBlockHook};
 use reth_engine_tree::{
     chain::{ChainEvent, FromOrchestrator},
@@ -42,8 +41,8 @@ use reth_node_ethereum::{EthEngineTypes, EthereumEngineValidator, EthereumNode};
 use reth_node_types::NodeTypesWithDBAdapter;
 use reth_payload_builder::{PayloadBuilderHandle, PayloadStore};
 use reth_provider::{
-    providers::{BlockchainProvider, StaticFileProvider},
-    BlockNumReader, ProviderFactory, StorageSettings, StorageSettingsCache,
+    providers::{BlockchainProvider, RocksDBBuilder, RocksDBProvider, StaticFileProvider},
+    BlockNumReader, ProviderFactory,
 };
 use reth_prune::{PruneModes, PrunerBuilder};
 use reth_rpc_api::EngineApiServer;
@@ -138,26 +137,44 @@ struct Outcome {
 }
 
 /// What a fixture leaves behind: its runtime, on which the engine's background tasks can run
-/// for seconds after the tree stopped, and its datadir.
+/// for seconds after the tree stopped, its databases and its datadir.
 struct Remains {
     runtime: Runtime,
-    db: Option<Arc<DatabaseEnv>>,
+    databases: Option<Databases>,
     datadir: Option<PathBuf>,
 }
 
 impl Remains {
-    /// Whether the background tasks released the fixture's database.
+    /// Whether the background tasks released the fixture's databases.
     fn is_released(&self) -> bool {
-        self.db.as_ref().is_none_or(|db| Arc::strong_count(db) == 1)
+        self.databases.as_ref().is_none_or(Databases::is_released)
     }
 
-    /// Drops the runtime, joining its threads, and tries to remove the datadir. Returns the
-    /// datadir if a task still writing to it made the removal fail.
+    /// Closes the databases, drops the runtime, joining its threads, and tries to remove the
+    /// datadir. Returns the datadir if a task still writing to it made the removal fail.
     fn clear(self) -> Option<PathBuf> {
-        let Self { runtime, db, datadir } = self;
-        drop(db);
+        let Self { runtime, databases, datadir } = self;
+        drop(databases);
         drop(runtime);
         datadir.filter(|datadir| fs::remove_dir_all(datadir).is_err())
+    }
+}
+
+/// A fixture's databases, held by the runner so that they are closed on a worker thread once the
+/// engine's background tasks release them.
+///
+/// A task holding the last provider factory releases the MDBX handle before the `RocksDB` one, and
+/// closing `RocksDB` flushes it. Were it closed on that task's thread, it could still be closing
+/// while the runner moves on or the process exits, which crashes the runner.
+struct Databases {
+    mdbx: Arc<DatabaseEnv>,
+    rocksdb: RocksDBProvider,
+}
+
+impl Databases {
+    /// Whether the runner holds the last handle to each database.
+    fn is_released(&self) -> bool {
+        Arc::strong_count(&self.mdbx) == 1 && self.rocksdb.is_last_handle()
     }
 }
 
@@ -169,7 +186,7 @@ struct Cleanup {
 }
 
 impl Cleanup {
-    /// Clears the remains whose database was released and retries the datadirs that could not be
+    /// Clears the remains whose databases were released and retries the datadirs that could not be
     /// removed yet.
     fn sweep(&mut self) {
         let (released, pending): (Vec<_>, Vec<_>) =
@@ -205,7 +222,7 @@ impl Cleanup {
 /// The runtime is per fixture because the engine's background tasks can outlive a fixture's
 /// tree by seconds, and on a runtime shared with the next fixtures they slowed those by seconds.
 /// The runtime's async tasks stop with the fixture; it is dropped, and the datadir removed, once
-/// the remaining tasks released the database, from the worker thread rather than from one of
+/// the remaining tasks released the databases, from the worker thread rather than from one of
 /// the runtime's own threads, which could not join itself.
 fn run_fixture(
     name: String,
@@ -216,7 +233,7 @@ fn run_fixture(
     let fork = format!("{:?}", test.network);
     let mut outcome = Outcome::default();
     let runtime = Runtime::test();
-    let mut remains = Remains { runtime: runtime.clone(), db: None, datadir: None };
+    let mut remains = Remains { runtime: runtime.clone(), databases: None, datadir: None };
     let result = runtime.handle().block_on(run_case(
         test,
         tree_config,
@@ -260,7 +277,7 @@ async fn run_case(
     let engine = Engine::start(chain_spec, &datadir, tree_config, runtime)?;
     let result = drive(&engine.rpc, test, outcome).await;
     outcome.last_block_hash = engine.provider.chain_info().ok().map(|info| info.best_hash);
-    remains.db = Some(engine.stop().await);
+    remains.databases = Some(engine.stop().await);
     result?;
 
     match outcome.last_block_hash {
@@ -279,7 +296,7 @@ struct Engine {
     /// The `engine_` JSON-RPC methods of the [`EngineApi`] handler.
     rpc: RpcModule<()>,
     provider: BlockchainProvider<FixtureNode>,
-    db: Arc<DatabaseEnv>,
+    databases: Databases,
     handler: tokio::task::JoinHandle<()>,
     to_handler: tokio::sync::mpsc::UnboundedSender<FromOrchestrator>,
 }
@@ -303,22 +320,23 @@ impl Engine {
             )
             .map_err(|e| setup_err(&e))?,
         );
+        let rocksdb = RocksDBBuilder::new(datadir.join("rocksdb"))
+            .with_default_tables()
+            .build()
+            .map_err(|e| setup_err(&e))?;
         let overlay_manager = OverlayManager::new(runtime.state_trie_overlay_worker_pool());
         let factory = ProviderFactory::<FixtureNode>::new(
             db.clone(),
             chain_spec.clone(),
             StaticFileProvider::read_write(datadir.join("static_files"))
                 .map_err(|e| setup_err(&e))?,
-            shared_rocksdb(),
+            rocksdb.clone(),
             runtime.clone(),
         )
         .map_err(|e| setup_err(&e))?
         .with_overlay_manager(overlay_manager.clone());
-        init_genesis_with_settings(&factory, StorageSettings::v1()).map_err(|e| setup_err(&e))?;
-        assert!(
-            !factory.cached_storage_settings().any_in_rocksdb(),
-            "the shared RocksDB is only valid while fixtures run with v1 storage settings"
-        );
+        // The node's default storage settings, as a fresh node writes them with its genesis.
+        init_genesis(&factory).map_err(|e| setup_err(&e))?;
         let provider = BlockchainProvider::new(factory.clone()).map_err(|e| setup_err(&e))?;
 
         let consensus = Arc::new(EthBeaconConsensus::new(chain_spec.clone()));
@@ -400,13 +418,14 @@ impl Engine {
             NoopNetwork::default(),
         );
 
-        Ok(Self { rpc: api.into_rpc().remove_context(), provider, db, handler, to_handler })
+        let databases = Databases { mdbx: db, rocksdb };
+        Ok(Self { rpc: api.into_rpc().remove_context(), provider, databases, handler, to_handler })
     }
 
     /// Asks the engine tree to persist its blocks and stop, as a node does on shutdown, and
-    /// returns the database, which background tasks may still hold.
-    async fn stop(self) -> Arc<DatabaseEnv> {
-        let Self { rpc, provider, db, handler, to_handler } = self;
+    /// returns the databases, which background tasks may still hold.
+    async fn stop(self) -> Databases {
+        let Self { rpc, provider, databases, handler, to_handler } = self;
         drop(rpc);
         let (tx, rx) = tokio::sync::oneshot::channel();
         if to_handler.send(FromOrchestrator::Terminate { tx }).is_ok() {
@@ -415,7 +434,7 @@ impl Engine {
         handler.abort();
         let _ = handler.await;
         drop(provider);
-        db
+        databases
     }
 }
 
@@ -562,6 +581,7 @@ mod tests {
     use alloy_primitives::{Address, Bloom, U256};
     use alloy_rpc_types_engine::ExecutionPayloadV1;
     use ef_tests::models::{ForkSpec, Header, State};
+    use reth_provider::{DatabaseProviderFactory, StorageSettings, StorageSettingsCache};
 
     /// A Paris fixture whose one payload is an empty block on genesis with the given state root,
     /// and that payload's block hash.
@@ -630,6 +650,33 @@ mod tests {
         cleanup.finish();
         assert_eq!(fs::read_dir(datadir_root.path()).unwrap().count(), 0, "datadir left behind");
         result
+    }
+
+    #[test]
+    fn engine_runs_on_the_default_storage_layout() {
+        let (test, _) = empty_block_fixture(None);
+        let datadir_root = tempfile::tempdir().unwrap();
+        let datadir = datadir_root.path().join("datadir");
+        fs::create_dir(&datadir).unwrap();
+        let runtime = Runtime::test();
+        let databases = runtime.handle().block_on(async {
+            let engine =
+                Engine::start(Arc::new(test.chain_spec()), &datadir, &tree_config(false), &runtime)
+                    .unwrap();
+            let settings =
+                engine.provider.database_provider_ro().unwrap().cached_storage_settings();
+            assert_eq!(settings, StorageSettings::base());
+            engine.stop().await
+        });
+        runtime.clone().shutdown_timeout(Duration::ZERO);
+        let mut cleanup = Cleanup::default();
+        cleanup.remains.push(Remains {
+            runtime,
+            databases: Some(databases),
+            datadir: Some(datadir),
+        });
+        cleanup.finish();
+        assert_eq!(fs::read_dir(datadir_root.path()).unwrap().count(), 0, "datadir left behind");
     }
 
     #[test]
