@@ -64,7 +64,7 @@ fn a_missing_path_is_an_error() {
     assert!(stderr.contains("cannot read") && stderr.contains("missing.json"), "{stderr}");
 }
 
-/// A fixture file that cannot be parsed is reported in the results and on stderr, the other
+/// A fixture file that cannot be parsed is reported on stderr and not in the results, the other
 /// files still run, and the run exits 2.
 fn check_unparsable_file(command: &str, extra_args: &[&str], file: &str) {
     let dir = tempfile::tempdir().unwrap();
@@ -83,11 +83,9 @@ fn check_unparsable_file(command: &str, extra_args: &[&str], file: &str) {
     assert!(stderr.contains("unparsable.json"), "{stderr}");
 
     let results: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(results.len(), 2, "{results:?}");
-    let pass =
-        |name: &str| results.iter().find(|result| result["name"] == name).map(|r| &r["pass"]);
-    assert_eq!(pass("empty_block"), Some(&true.into()));
-    assert_eq!(pass(&unparsable.display().to_string()), Some(&false.into()));
+    assert_eq!(results.len(), 1, "{results:?}");
+    assert_eq!(results[0]["name"], "empty_block");
+    assert_eq!(results[0]["pass"], true);
 }
 
 #[test]
