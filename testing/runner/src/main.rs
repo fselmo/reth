@@ -110,12 +110,7 @@ fn main() {
         Command::BlockTest(BlockTestArgs { run, .. }) |
         Command::EngineTest(EngineTestArgs { run, .. }) => run,
     };
-    for path in &args.paths {
-        if let Err(err) = check_readable(path) {
-            eprintln!("error: cannot read {}: {err}", path.display());
-            std::process::exit(2);
-        }
-    }
+    exit_unless_readable(&args.paths);
     if args.bal_report {
         report::init();
     }
@@ -125,12 +120,14 @@ fn main() {
         Command::BlockTest(BlockTestArgs { run: args, bal_withhold }) => {
             let options = BlockTestOptions { bal_sequential: args.bal_sequential, bal_withhold };
             let files = fixture_files(&args.paths, "blockchain_tests");
+            exit_unless_readable(&files);
             BlockchainTests::run_fixtures(files, options, args.workers, &on_result);
             // Every fixture ran, so nothing uses the shared RocksDB instance anymore.
             remove_shared_rocksdb();
         }
         Command::EngineTest(EngineTestArgs { run: args, storage }) => {
             let files = fixture_files(&args.paths, "blockchain_tests_engine");
+            exit_unless_readable(&files);
             engine_test::run_fixtures(
                 files,
                 args.bal_sequential,
@@ -153,6 +150,16 @@ fn main() {
     }
     if !results.iter().all(|result| result.pass) {
         std::process::exit(1);
+    }
+}
+
+/// Exits 2, before any fixture runs, if one of `paths` does not exist or cannot be read.
+fn exit_unless_readable(paths: &[PathBuf]) {
+    for path in paths {
+        if let Err(err) = check_readable(path) {
+            eprintln!("error: cannot read {}: {err}", path.display());
+            std::process::exit(2);
+        }
     }
 }
 
