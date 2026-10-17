@@ -140,10 +140,11 @@ fn main() {
             );
         }
     }
-    let results = results.into_inner().unwrap();
+    // A file that could not be loaded has no fixture results: it goes to stderr only, and means
+    // the run did not cover all of its input.
+    let (unloaded, results): (Vec<_>, Vec<_>) =
+        results.into_inner().unwrap().into_iter().partition(|result| result.load_failed);
     println!("{}", serde_json::to_string(&results).expect("results serialize"));
-    // A file that could not be loaded means the run did not cover all of its input.
-    let unloaded: Vec<_> = results.iter().filter(|result| result.load_failed).collect();
     for result in &unloaded {
         eprintln!("error: {}", result.error);
     }
