@@ -113,7 +113,8 @@ impl BlockchainTests {
                 options,
                 &mut last_block_hash,
                 &mut rejections,
-            );
+            )
+            .and_then(|()| check_last_block_hash(&test, last_block_hash));
             on_result(
                 FixtureResult::new(name, fork, result)
                     .with_last_block_hash(last_block_hash)
@@ -474,6 +475,18 @@ fn run_case(
     }
 
     Ok(())
+}
+
+/// Checks that the chain ends on the fixture's `lastblockhash`, whether or not a block was
+/// rejected.
+fn check_last_block_hash(case: &BlockchainTest, last_block_hash: B256) -> Result<(), Error> {
+    if last_block_hash == case.lastblockhash {
+        return Ok(())
+    }
+    Err(Error::Assertion(format!(
+        "last block hash mismatch: got {last_block_hash}, expected {}",
+        case.lastblockhash
+    )))
 }
 
 /// The rejection of the fixture block with the given number, counted from 1, with its hash if
