@@ -64,6 +64,46 @@ fn a_missing_path_is_an_error() {
     assert!(stderr.contains("cannot read") && stderr.contains("missing.json"), "{stderr}");
 }
 
+/// A fixture file found in a directory that cannot be read stops the run before any fixture
+/// runs.
+#[cfg(unix)]
+fn check_unreadable_file_in_dir(command: &str, extra_args: &[&str], file: &str) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    fs::copy(fixture(file), dir.path().join(file)).unwrap();
+    let unreadable = dir.path().join("unreadable.json");
+    fs::copy(fixture(file), &unreadable).unwrap();
+    fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o000)).unwrap();
+    if fs::File::open(&unreadable).is_ok() {
+        // Running as root, which reads the file anyway.
+        return
+    }
+
+    let output = Command::new(env!("CARGO_BIN_EXE_ef-test-runner"))
+        .arg(command)
+        .arg(dir.path())
+        .args(extra_args)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty(), "{}", String::from_utf8_lossy(&output.stdout));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("cannot read") && stderr.contains("unreadable.json"), "{stderr}");
+}
+
+#[cfg(unix)]
+#[test]
+fn blocktest_exits_2_on_an_unreadable_file_in_a_directory() {
+    check_unreadable_file_in_dir("blocktest", &[], "blocktest_empty_block.json");
+}
+
+#[cfg(unix)]
+#[test]
+fn enginetest_exits_2_on_an_unreadable_file_in_a_directory() {
+    check_unreadable_file_in_dir("enginetest", &["--workers", "1"], "enginetest_empty_block.json");
+}
+
 /// A fixture file that cannot be parsed is reported on stderr and not in the results, the other
 /// files still run, and the run exits 2.
 fn check_unparsable_file(command: &str, extra_args: &[&str], file: &str) {
