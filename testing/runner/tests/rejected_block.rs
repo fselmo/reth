@@ -123,6 +123,28 @@ fn blocktest_undecodable_block() {
     assert_eq!(result["rejections"], json!([{"index": 0, "error": "input too short"}]));
 }
 
+/// The blocks before one that does not decode are imported, so the head is the last of them.
+#[test]
+fn blocktest_undecodable_block_after_valid_block() {
+    let mut json: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(fixture("blocktest_empty_block.json")).unwrap())
+            .unwrap();
+    let test = json.as_object_mut().unwrap().values_mut().next().unwrap();
+    test["blocks"].as_array_mut().unwrap().push(json!({
+        "rlp": "0xf90200c0",
+        "expectException": "BlockException.RLP_STRUCTURES_ENCODING",
+    }));
+    let last_block_hash = test["lastblockhash"].clone();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("blocktest_empty_block.json");
+    fs::write(&path, json.to_string()).unwrap();
+
+    let result = run(&["blocktest"], &path);
+    assert_eq!(result["pass"], true, "{}", result["error"]);
+    assert_eq!(result["lastBlockHash"], last_block_hash);
+    assert_eq!(result["rejections"], json!([{"index": 1, "error": "input too short"}]));
+}
+
 #[test]
 fn clean_fixtures_report_no_rejections() {
     let result = run(&["blocktest"], &fixture("blocktest_empty_block.json"));

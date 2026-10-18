@@ -347,16 +347,16 @@ fn run_case(
     .map_err(|err| Error::block_failed(0, err))?;
     provider.write_trie_updates(trie_updates).map_err(|err| Error::block_failed(0, err))?;
 
-    // Decode blocks
-    let blocks = decode_blocks(&case.blocks)?;
-
     let executor_provider = EthEvmConfig::ethereum(chain_spec.clone());
     let mut parent = genesis_block;
     let mut bal_buf = Vec::new();
 
-    for (block_index, block) in blocks.iter().enumerate() {
-        // Note: same as the comment on `decode_blocks` as to why we cannot use block.number
+    for (block_index, fixture_block) in case.blocks.iter().enumerate() {
+        // The blocks do not include the genesis block which is why we have the plus one.
+        // We also cannot use block.number because for invalid blocks, this may be incorrect.
         let block_number = (block_index + 1) as u64;
+        // Decoded one at a time, so that the blocks before one that does not decode are imported.
+        let block = &decode_block(fixture_block, block_number)?;
 
         // Insert the block into the database
         provider.insert_block(block).map_err(|err| Error::block_failed(block_number, err))?;
@@ -371,9 +371,8 @@ fn run_case(
 
         // Like a block downloaded with its access list, the delivered list counts only when the
         // header commits to one.
-        let delivered = case.blocks[block_index]
-            .access_list()
-            .filter(|_| block.block_access_list_hash.is_some());
+        let delivered =
+            fixture_block.access_list().filter(|_| block.block_access_list_hash.is_some());
         let access_list = delivered
             .filter(|_| !options.bal_withhold)
             .map(|access_list| check_delivered_access_list(block, access_list))
@@ -501,25 +500,15 @@ fn rejection(case: &BlockchainTest, block_number: u64, error: String) -> Rejecti
     Rejection { index, hash, error }
 }
 
-fn decode_blocks(
-    test_case_blocks: &[crate::models::Block],
-) -> Result<Vec<RecoveredBlock<Block>>, Error> {
-    let mut blocks = Vec::with_capacity(test_case_blocks.len());
-    for (block_index, block) in test_case_blocks.iter().enumerate() {
-        // The blocks do not include the genesis block which is why we have the plus one.
-        // We also cannot use block.number because for invalid blocks, this may be incorrect.
-        let block_number = (block_index + 1) as u64;
-
-        let decoded = SealedBlock::<Block>::decode(&mut block.rlp.as_ref())
-            .map_err(|err| Error::block_failed(block_number, err))?;
-
-        let recovered_block =
-            decoded.try_recover().map_err(|err| Error::block_failed(block_number, err))?;
-
-        blocks.push(recovered_block);
-    }
-
-    Ok(blocks)
+/// Decodes the fixture block with the given number, counted from 1, and recovers its senders.
+fn decode_block(
+    block: &crate::models::Block,
+    block_number: u64,
+) -> Result<RecoveredBlock<Block>, Error> {
+    SealedBlock::<Block>::decode(&mut block.rlp.as_ref())
+        .map_err(|err| Error::block_failed(block_number, err))?
+        .try_recover()
+        .map_err(|err| Error::block_failed(block_number, err))
 }
 
 /// Checks the access list delivered beside a block the way reth's sync checks one downloaded with
