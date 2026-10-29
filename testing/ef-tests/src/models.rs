@@ -34,9 +34,23 @@ pub struct BlockchainTest {
     pub lastblockhash: B256,
     /// Network spec.
     pub network: ForkSpec,
+    /// The chain configuration beside the network.
+    #[serde(default)]
+    pub config: FixtureConfig,
     #[serde(default)]
     /// Engine spec.
     pub seal_engine: SealEngine,
+}
+
+impl BlockchainTest {
+    /// Returns the chain spec of the test's network, with the test's chain configuration.
+    pub fn chain_spec(&self) -> Arc<ChainSpec> {
+        let spec = self.network.to_chain_spec();
+        let Some(accounts) = &self.config.zero_nonce_storage_accounts else { return spec };
+        let mut spec = Arc::unwrap_or_clone(spec);
+        spec.genesis.config.eip8253_accounts = Some(accounts.clone());
+        Arc::new(spec)
+    }
 }
 
 /// A blockchain test in the engine format, whose blocks are Engine API payloads.
@@ -51,6 +65,9 @@ pub struct EngineTest {
     pub lastblockhash: B256,
     /// Network spec.
     pub network: ForkSpec,
+    /// The chain configuration beside the network.
+    #[serde(default)]
+    pub config: FixtureConfig,
     /// The payloads to send, in order.
     pub engine_new_payloads: Vec<EngineNewPayload>,
 }
@@ -59,7 +76,7 @@ impl EngineTest {
     /// Returns the chain spec of the test's network, with the test's genesis block.
     pub fn chain_spec(&self) -> ChainSpec {
         let header = &self.genesis_block_header;
-        let genesis = Genesis::default()
+        let mut genesis = Genesis::default()
             .with_nonce(u64::from_be_bytes(header.nonce.0))
             .with_timestamp(header.timestamp.to())
             .with_extra_data(header.extra_data.clone())
@@ -72,8 +89,17 @@ impl EngineTest {
             .with_blob_gas_used(header.blob_gas_used.map(|gas| gas.to()))
             .with_slot_number(header.slot_number.map(|slot| slot.to()))
             .extend_accounts(self.pre.clone().into_genesis_state());
+        genesis.config.eip8253_accounts = self.config.zero_nonce_storage_accounts.clone();
         self.network.chain_spec_on(genesis)
     }
+}
+
+/// The chain configuration of a test, the part of it the network does not imply.
+#[derive(Debug, PartialEq, Eq, Clone, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct FixtureConfig {
+    /// The accounts whose nonce is set to one at the Bogota fork (EIP-8253).
+    pub zero_nonce_storage_accounts: Option<Vec<Address>>,
 }
 
 /// One `engine_newPayload` call of an [`EngineTest`].
@@ -653,6 +679,50 @@ mod tests {
             assert_eq!(max_blob_count(14_999), max_before, "{network}");
             assert_eq!(max_blob_count(15_000), max_after, "{network}");
         }
+    }
+
+    #[test]
+    fn chain_spec_has_the_zero_nonce_storage_accounts() {
+        use reth_evm::eth::spec::EthExecutorSpec;
+
+        let accounts = [Address::repeat_byte(1), Address::repeat_byte(2)];
+        let config: FixtureConfig = serde_json::from_value(serde_json::json!({
+            "network": "AmsterdamToBogotaAtTime15k",
+            "chainid": "0x01",
+            "zeroNonceStorageAccounts": accounts,
+        }))
+        .unwrap();
+        let network = ForkSpec::AmsterdamToBogotaAtTime15k;
+        let blocktest = |config| {
+            let test = BlockchainTest {
+                genesis_block_header: Header::default(),
+                genesis_rlp: None,
+                blocks: Vec::new(),
+                post_state: None,
+                pre: State::default(),
+                lastblockhash: B256::ZERO,
+                network,
+                config,
+                seal_engine: SealEngine::default(),
+            };
+            test.chain_spec().eip8253_accounts().to_vec()
+        };
+        let enginetest = |config| {
+            let test = EngineTest {
+                genesis_block_header: Header::default(),
+                pre: State::default(),
+                lastblockhash: B256::ZERO,
+                network,
+                config,
+                engine_new_payloads: Vec::new(),
+            };
+            test.chain_spec().eip8253_accounts().to_vec()
+        };
+
+        assert_eq!(blocktest(config.clone()), accounts);
+        assert_eq!(enginetest(config), accounts);
+        assert!(blocktest(FixtureConfig::default()).is_empty());
+        assert!(enginetest(FixtureConfig::default()).is_empty());
     }
 
     #[test]

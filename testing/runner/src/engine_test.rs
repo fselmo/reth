@@ -613,6 +613,7 @@ mod tests {
             pre: State::default(),
             lastblockhash: B256::ZERO,
             network: ForkSpec::Merge,
+            config: Default::default(),
             engine_new_payloads: Vec::new(),
         };
         let chain_spec = test.chain_spec();

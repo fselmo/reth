@@ -309,7 +309,7 @@ fn run_case(
     last_block_hash: &mut B256,
 ) -> Result<(), Error> {
     // Create a new test database and initialize a provider for the test case.
-    let chain_spec = case.network.to_chain_spec();
+    let chain_spec = case.chain_spec();
     let factory = create_test_provider_factory(chain_spec.clone());
     let provider = factory.database_provider_rw().unwrap();
 
